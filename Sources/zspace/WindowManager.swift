@@ -1,0 +1,1146 @@
+import AppKit
+import MacKit
+import ApplicationServices
+import Carbon
+import ZSpaceCore
+
+private let logTime = ISO8601DateFormatter()
+
+/// Thread-safe (stderr writes are atomic per line).
+func log(_ s: String) {
+    FileHandle.standardError.write(Data("\(logTime.string(from: Date())) zspace: \(s)\n".utf8))
+}
+
+enum Screens {
+    /// NSScreen (bottom-left origin) → Accessibility coordinates (top-left origin of the primary screen).
+    static func read() -> [Monitor] {
+        let screens = NSScreen.screens
+        guard let primary = screens.first else {
+            let r = CGRect(x: 0, y: 0, width: 1920, height: 1080)
+            return [Monitor(id: 0, name: "fallback", frame: r, visibleFrame: r, isMain: true)]
+        }
+        let h = primary.frame.height
+        func ax(_ r: NSRect) -> CGRect { CGRect(x: r.minX, y: h - r.maxY, width: r.width, height: r.height) }
+        return screens.map { s in
+            let id = (s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
+            return Monitor(id: id, name: s.localizedName, frame: ax(s.frame), visibleFrame: ax(s.visibleFrame),
+                           isMain: s == primary)
+        }
+    }
+}
+
+/// Lock-protected integer, for focus generations read off the main thread.
+final class Counter {
+    private let lock = NSLock()
+    private var v = 0
+    var value: Int { lock.withLock { v } }
+    func increment() -> Int { lock.withLock { v += 1; return v } }
+}
+
+/// One AXObserver per app process. Created off the main thread (talking to a launching app can block);
+/// its callbacks are delivered on the main run loop.
+final class AppTracker {
+    let app: NSRunningApplication
+    let pid: pid_t
+    let element: AXUIElement
+    private let observer: AXObserver
+    private let lock = NSLock()
+    private var watched = Set<CGWindowID>()
+
+    init?(_ app: NSRunningApplication, refcon: UnsafeMutableRawPointer) {
+        self.app = app
+        pid = app.processIdentifier
+        element = .app(pid)
+        var obs: AXObserver?
+        guard AXObserverCreate(pid, axCallback, &obs) == .success, let obs else { return nil }
+        observer = obs
+        var ok = false
+        for n in [kAXWindowCreatedNotification, kAXFocusedWindowChangedNotification,
+                  kAXApplicationHiddenNotification, kAXApplicationShownNotification] {
+            ok = AXObserverAddNotification(obs, element, n as CFString, refcon) == .success || ok
+        }
+        guard ok else { return nil }  // app not ready for AX yet; retried on the next sync
+        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(obs), .defaultMode)
+    }
+
+    func watch(_ w: AXUIElement, id: CGWindowID, refcon: UnsafeMutableRawPointer) {
+        guard lock.withLock({ watched.insert(id).inserted }) else { return }
+        for n in [kAXUIElementDestroyedNotification, kAXWindowMovedNotification, kAXWindowResizedNotification,
+                  kAXWindowMiniaturizedNotification, kAXTitleChangedNotification] {
+            AXObserverAddNotification(observer, w, n as CFString, refcon)
+        }
+    }
+
+    func unwatch(_ id: CGWindowID) { lock.withLock { _ = watched.remove(id) } }
+
+    deinit { CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode) }
+}
+
+private func axCallback(_: AXObserver, _ element: AXUIElement, _ notification: CFString, _ refcon: UnsafeMutableRawPointer?) {
+    guard let refcon else { return }
+    Unmanaged<WindowManager>.fromOpaque(refcon).takeUnretainedValue().handleAX(element, notification as String)
+}
+
+/// Threading model:
+/// - main thread: the model and all bookkeeping. Never waits on another app.
+/// - `axQueue` (serial): every frame write and focus change, in command order.
+/// - `syncQueue` (serial): window enumeration, one thread per app inside.
+/// - `eventQueue` (serial): small reads triggered by notifications (focused window, frames, titles).
+final class WindowManager {
+    let model: Model
+    let configURL: URL
+    private(set) var configWarnings: [String] = []
+    private let tap = EventTap()
+    private let statusBar = StatusBar()
+    private let border = FocusBorder()
+    let chrome = MacChrome()
+
+    private let axQueue = DispatchQueue(label: "zspace.ax", qos: .userInteractive)
+    private let syncQueue = DispatchQueue(label: "zspace.sync", qos: .userInitiated)
+    private let eventQueue = DispatchQueue(label: "zspace.events", qos: .userInteractive)
+    private let focusGeneration = Counter()
+
+    private var trackers: [pid_t: AppTracker] = [:]
+    private var elements: [WindowID: AXUIElement] = [:]
+    private var pids: [WindowID: pid_t] = [:]
+    private var hiddenByUs = Set<WindowID>()
+    private var lastApplied: [WindowID: CGRect] = [:]
+    /// Last size we wrote; when unchanged a move needs one AX call instead of three.
+    private var appliedSize: [WindowID: CGSize] = [:]
+    private var reappliedAt: [WindowID: Date] = [:]
+    /// Windows that left the layout for a while (minimized, app hidden, briefly unlisted): where they lived,
+    /// so they come back to the same workspace instead of the focused one.
+    private var parked: [WindowID: (workspace: String, floating: Bool)] = [:]
+    /// Consecutive syncs a still-existing window was missing from its app's list.
+    private var missing: [WindowID: Int] = [:]
+    private var dragged: [WindowID: Bool] = [:]  // true = was resized
+    private var modDrag: ModDrag?
+    private var lastFocused: WindowID?
+    private var pendingFocus: (id: WindowID, until: Date)?
+    private var lastFocusedMonitor: MonitorID?
+    private var applyQueued = false
+    private var syncScope: SyncScope?
+    private var syncInFlight = false
+    private var startup = true
+    private var capsActive = false
+    private var lastMouseMove = Date.distantPast
+    private var secureInput = false
+    private var timers: [Timer] = []
+    private let debug = ProcessInfo.processInfo.environment["ZSPACE_DEBUG"] != nil
+    /// AX and event-tap callbacks hold this pointer, so the manager is retained for the life of the process.
+    private lazy var refcon: UnsafeMutableRawPointer = Unmanaged.passRetained(self).toOpaque()
+
+    /// Session saved across restarts (window → workspace). /tmp is wiped on reboot, when window IDs change.
+    private struct Session: Codable {
+        struct Entry: Codable {
+            var id: UInt32
+            var workspace: String?
+            var floating: Bool
+            var bundle: String
+        }
+        var focused: String
+        var windows: [Entry]
+    }
+    private static let sessionPath = "/tmp/zspace-\(getuid())-session.json"
+    private var restoring: Session?
+    private var lastSavedSession: Data?
+
+    init(configURL: URL) {
+        self.configURL = configURL
+        let (cfg, warnings) = WindowManager.loadConfig(configURL)
+        configWarnings = warnings
+        model = Model(config: cfg, monitors: Screens.read())
+        if let d = FileManager.default.contents(atPath: Self.sessionPath) {
+            restoring = try? JSONDecoder().decode(Session.self, from: d)
+        }
+    }
+
+    private func timed<T>(_ label: @autoclosure () -> String, _ body: () -> T) -> T {
+        guard debug else { return body() }
+        let t = DispatchTime.now().uptimeNanoseconds
+        let r = body()
+        log(String(format: "%@ %.2f ms", label(), Double(DispatchTime.now().uptimeNanoseconds - t) / 1e6))
+        return r
+    }
+
+    // MARK: Lifecycle
+
+    func start() {
+        _ = refcon
+        AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 1.0)
+        tap.onCommand = { [unowned self] in runCommand($0) }
+        tap.onMouseUp = { [unowned self] in mouseUp() }
+        tap.onMouseMoved = { [unowned self] in mouseMoved($0) }
+        tap.onModDrag = { [unowned self] phase, p in
+            switch phase {
+            case .begin(let resize): modDragBegan(at: p, resize: resize)
+            case .move: modDragMoved(to: p)
+            case .end: modDragEnded(at: p)
+            }
+        }
+        if !tap.start() { log("could not create the event tap; hotkeys are disabled") }
+        applyBindings()
+        if !IPC.serve({ [unowned self] in handleIPC($0, $1) }) { log("could not open \(IPC.socketPath)") }
+
+        let nc = NSWorkspace.shared.notificationCenter
+        func pid(_ n: Notification) -> pid_t? {
+            (n.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.processIdentifier
+        }
+        nc.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [unowned self] n in
+            guard let p = pid(n) else { return }
+            requestSync(.apps([p]))
+            // Apps often answer AX only a moment after launch: look again soon, then a few more times.
+            for d in [0.15, 0.4, 0.8, 1.5, 3] { DispatchQueue.main.asyncAfter(deadline: .now() + d) { self.requestSync(.apps([p])) } }
+        }
+        nc.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { [unowned self] n in
+            guard let p = pid(n) else { return }
+            trackers[p] = nil
+            requestSync(.apps([p]))
+        }
+        nc.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [unowned self] n in
+            refreshOSFocus()
+            if let p = pid(n) { requestSync(.apps([p])) }  // also catches windows that never announced themselves
+        }
+        for name in [NSWorkspace.didHideApplicationNotification, NSWorkspace.didUnhideApplicationNotification] {
+            nc.addObserver(forName: name, object: nil, queue: .main) { [unowned self] n in
+                if let p = pid(n) { requestSync(.apps([p])) }
+            }
+        }
+        nc.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { [unowned self] _ in
+            requestSync(.all)
+            checkSpaces()
+        }
+        nc.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [unowned self] _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.screensChanged() }
+        }
+        NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
+                                               object: nil, queue: .main) { [unowned self] _ in screensChanged() }
+
+        // Safety net for ghosts and windows that never announce themselves. Runs off the main thread.
+        timers.append(Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [unowned self] _ in requestSync(.all) })
+        timers.append(Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [unowned self] _ in
+            let s = IsSecureEventInputEnabled()
+            if s != secureInput { secureInput = s; updateStatus() }
+            saveSession()  // only writes when something moved; survives crashes and kills
+            checkSpaces()
+        })
+
+        statusBar.install(manager: self)
+        checkSpaces()
+        if let want = model.config.immersive { chrome.set(want) }
+        requestSync(.all)
+        for c in model.config.execs + model.config.execAlways { exec(c) }
+        if !configWarnings.isEmpty { log("config warnings:\n  " + configWarnings.joined(separator: "\n  ")) }
+        log("started with \(model.monitors.count) monitor(s); config \(configURL.path)")
+    }
+
+    func shutdown() {
+        saveSession()
+        chrome.restore()
+        CapsLock.disable()
+        restoreAllWindows()
+        unlink(IPC.socketPath)
+        exit(0)
+    }
+
+    /// Puts every window we parked off-screen back where the user can reach it.
+    func restoreAllWindows() {
+        axQueue.sync {}  // let queued moves finish first
+        for id in hiddenByUs {
+            guard let el = elements[id], let w = model.windows[id] else { continue }
+            let m = w.workspace.flatMap { model.monitor($0.monitorID) } ?? model.mainMonitor
+            let v = m.visibleFrame
+            if w.isFloating, let f = w.floatingFrame, v.intersects(f) {
+                el.setFrame(f)
+            } else {
+                let s = el.size ?? CGSize(width: v.width * 0.6, height: v.height * 0.6)
+                let size = CGSize(width: min(s.width, v.width), height: min(s.height, v.height))
+                el.setFrame(CGRect(x: v.midX - size.width / 2, y: v.midY - size.height / 2,
+                                   width: size.width, height: size.height))
+            }
+        }
+        hiddenByUs.removeAll()
+    }
+
+    private func saveSession() {
+        let entries = model.sessionSnapshot().map {
+            Session.Entry(id: $0.id, workspace: $0.workspace, floating: $0.floating,
+                          bundle: model.windows[$0.id]?.info.bundleID ?? "")
+        }
+        guard let data = try? JSONEncoder().encode(Session(focused: model.focusedWorkspace.name, windows: entries)),
+              data != lastSavedSession else { return }
+        lastSavedSession = data
+        FileManager.default.createFile(atPath: Self.sessionPath, contents: data, attributes: [.posixPermissions: 0o600])
+    }
+
+    // MARK: Config
+
+    static func loadConfig(_ url: URL) -> (Config, [String]) {
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: url.path) {
+            try? fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? DefaultConfig.text.write(to: url, atomically: true, encoding: .utf8)
+        }
+        let text = (try? String(contentsOf: url, encoding: .utf8)) ?? DefaultConfig.text
+        let c = Config.parse(text)
+        return (c, c.warnings)
+    }
+
+    func reload() {
+        let before = model.config.immersive
+        let (c, w) = WindowManager.loadConfig(configURL)
+        configWarnings = w
+        model.setConfig(c)
+        lastApplied.removeAll()
+        applyBindings()
+        if let want = c.immersive, want != before { chrome.set(want) }
+        for cmd in c.execAlways { exec(cmd) }
+        log(w.isEmpty ? "config reloaded" : "config reloaded with warnings:\n  " + w.joined(separator: "\n  "))
+        apply()
+    }
+
+    private func applyBindings() {
+        let caps = model.config.usesCapsLock
+        if caps != capsActive {  // hidutil only when the setting changes, not on every mode switch
+            if caps { CapsLock.enable() } else { CapsLock.disable() }
+            capsActive = caps
+        }
+        tap.setBindings(model.config.modes[model.mode] ?? [:], trackMouseMoves: model.config.focusFollowsMouse,
+                        floatingModifier: model.config.floatingModifier, capsLock: caps,
+                        interceptFullscreen: model.config.interceptNativeFullscreen)
+        updateStatus()
+    }
+
+    // MARK: Commands
+
+    /// Never touches another app synchronously: model update, then the AX work is queued.
+    @discardableResult
+    func runCommand(_ text: String) -> CommandResult {
+        let modeBefore = model.mode
+        let r = timed("model.run '\(text)'") { model.run(text) }
+        perform(r.effects)
+        if model.mode != modeBefore { applyBindings() }
+        if !r.ok { log("command '\(text)': \(r.errors.joined(separator: "; "))") }
+        timed("apply") { apply() }
+        return r
+    }
+
+    private func perform(_ effects: [Effect]) {
+        for e in effects {
+            switch e {
+            case .exec(let c): exec(c)
+            case .close(let id):
+                if let el = elements[id] { axQueue.async { el.element(kAXCloseButtonAttribute)?.perform(kAXPressAction) } }
+            case .reload: DispatchQueue.main.async { self.reload() }
+            case .exit: DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { self.shutdown() }
+            case .immersive(let t):
+                chrome.set(t == .toggle ? !chrome.isImmersive : t == .enable)
+                updateStatus()
+            }
+        }
+    }
+
+    private func exec(_ cmd: String) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", cmd]
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = (env["PATH"].map { $0 + ":" } ?? "") + "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+        p.environment = env
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        do { try p.run() } catch { log("exec '\(cmd)' failed: \(error)") }
+    }
+
+    func handleIPC(_ type: String, _ payload: String) -> String {
+        switch type {
+        case "run_command", "command":
+            let r = runCommand(payload)
+            var d: [String: Any] = ["success": r.ok]
+            if !r.ok { d["error"] = r.errors.joined(separator: "; ") }
+            return IPC.json([d])
+        case "get_tree": return IPC.json(model.treeJSON())
+        case "get_workspaces": return IPC.json(model.workspacesJSON())
+        case "get_binding_modes": return IPC.json(model.config.modes.keys.sorted())
+        case "get_bindings":
+            return IPC.json((model.config.modes[model.mode] ?? [:]).map { ["key": $0.key.description, "command": $0.value] })
+        case "get_config": return IPC.json(["path": configURL.path, "warnings": configWarnings])
+        case "get_version": return IPC.json(["version": zspaceVersion])
+        default: return IPC.json(["success": false, "error": "unknown message type '\(type)'"])
+        }
+    }
+
+    // MARK: Events
+
+    func handleAX(_ el: AXUIElement, _ n: String) {
+        var pid: pid_t = 0
+        AXUIElementGetPid(el, &pid)  // local, no round trip to the app
+        switch n {
+        case kAXWindowMovedNotification, kAXWindowResizedNotification:
+            let resized = n == kAXWindowResizedNotification
+            eventQueue.async { [weak self] in
+                guard let id = el.windowID else { return }
+                let frame = el.frame
+                DispatchQueue.main.async { self?.windowMoved(id, frame: frame, resized: resized) }
+            }
+        case kAXTitleChangedNotification:
+            eventQueue.async { [weak self] in
+                guard let id = el.windowID else { return }
+                let title = el.title
+                DispatchQueue.main.async {
+                    guard let self, var info = self.model.windows[id]?.info, info.title != title else { return }
+                    info.title = title
+                    self.model.updateInfo(id, info)
+                }
+            }
+        case kAXFocusedWindowChangedNotification:
+            refreshOSFocus()
+            requestSync(.apps([pid]))
+        case kAXUIElementDestroyedNotification:
+            // Closed: give its space back right away instead of waiting for a rescan.
+            if let id = elements.first(where: { CFEqual($0.value, el) })?.key {
+                forget(id)
+                scheduleApply()
+            }
+            requestSync(.apps([pid]))
+        default:  // window created/minimized, app hidden/shown
+            requestSync(.apps([pid]))
+        }
+    }
+
+    private func windowMoved(_ id: WindowID, frame: CGRect?, resized: Bool) {
+        guard model.windows[id] != nil, modDrag == nil else { return }
+        if tap.isMouseDown {
+            dragged[id] = (dragged[id] ?? false) || resized
+            border.hide()
+            return
+        }
+        // The app moved its own window (e.g. restored a saved frame). Put it back, at most once a second
+        // so apps that snap sizes (terminals) can't make us loop.
+        guard let target = lastApplied[id], let f = frame,
+              Date().timeIntervalSince(reappliedAt[id] ?? .distantPast) > 1 else { return }
+        if abs(f.minX - target.minX) > 2 || abs(f.minY - target.minY) > 2
+            || abs(f.width - target.width) > 30 || abs(f.height - target.height) > 30 {
+            reappliedAt[id] = Date()
+            lastApplied[id] = nil
+            appliedSize[id] = nil
+            scheduleApply()
+        }
+    }
+
+    /// Reads which window the OS has focused, off the main thread, and follows it.
+    private func refreshOSFocus() {
+        guard let front = NSWorkspace.shared.frontmostApplication else { return }
+        let pid = front.processIdentifier
+        guard pid != getpid() else { return }
+        eventQueue.async { [weak self] in
+            guard let w = AXUIElement.app(pid).focusedWindow, let id = w.windowID else { return }
+            DispatchQueue.main.async { self?.osFocusReported(id) }
+        }
+    }
+
+    private func osFocusReported(_ id: WindowID) {
+        if let p = pendingFocus {
+            // We just asked for a different window; ignore stale reports until it lands.
+            if p.id == id || Date() > p.until { pendingFocus = nil } else { return }
+        }
+        guard model.windows[id] != nil else { return }
+        lastFocused = id
+        if id != model.focusedWindow?.id {
+            model.osFocused(id)
+            scheduleApply()
+        }
+    }
+
+    private func mouseUp() {
+        // Give the window server a beat to settle the final frame.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [self] in
+            if !dragged.isEmpty {
+                let cursor = CGEvent(source: nil)?.location
+                for (id, resized) in dragged {
+                    guard let w = model.windows[id], let f = elements[id]?.frame else { continue }
+                    if w.isFloating {
+                        model.floatingWindowDropped(id, frame: f)
+                        continue
+                    }
+                    if resized { model.userResized(id, to: f) } else if let c = cursor { model.userDropped(id, at: c) }
+                    lastApplied[id] = nil
+                    appliedSize[id] = nil
+                }
+                dragged.removeAll()
+            }
+            refreshOSFocus()
+            scheduleApply()
+            startSync()  // anything deferred while the button was down
+        }
+    }
+
+    private func mouseMoved(_ p: CGPoint) {
+        guard model.config.focusFollowsMouse, !tap.isMouseDown, Date().timeIntervalSince(lastMouseMove) > 0.05 else { return }
+        lastMouseMove = Date()
+        guard let w = model.window(at: p), w.id != model.focusedWindow?.id else { return }
+        model.osFocused(w.id)
+        apply(warp: false)
+    }
+
+    private func screensChanged() {
+        model.setMonitors(Screens.read())
+        lastApplied.removeAll()
+        appliedSize.removeAll()
+        hiddenByUs.removeAll()  // re-hide on the new geometry
+        requestSync(.all)
+        scheduleApply()
+    }
+
+    // MARK: floating_modifier drags
+
+    private struct ModDrag {
+        let id: WindowID
+        let el: AXUIElement
+        let resize: Bool
+        let floating: Bool
+        let start: CGPoint
+        let startFrame: CGRect
+        /// Resize moves the edges nearest to where the drag started.
+        let leftEdge: Bool
+        let topEdge: Bool
+    }
+
+    private func modDragBegan(at p: CGPoint, resize: Bool) {
+        border.hide()  // also keeps the AX hit test below from landing on our own overlay
+        let hit = window(under: p)
+        if debug { log("modDrag begin at \(p) resize=\(resize) → \(hit.map { "\($0.0)" } ?? "no window")") }
+        guard let (id, el) = hit, let w = model.windows[id],
+              let frame = w.isFloating ? el.frame : w.rect else { return }
+        if id != model.focusedWindow?.id {
+            model.osFocused(id)
+            apply(warp: false)
+        }
+        modDrag = ModDrag(id: id, el: el, resize: resize, floating: w.isFloating, start: p, startFrame: frame,
+                          leftEdge: p.x < frame.midX, topEdge: p.y < frame.midY)
+        border.hide()
+    }
+
+    private func modDragMoved(to p: CGPoint) {
+        guard let d = modDrag else { return }
+        let (dx, dy) = (p.x - d.start.x, p.y - d.start.y)
+        var f = d.startFrame
+        guard d.resize else {
+            let origin = CGPoint(x: f.minX + dx, y: f.minY + dy)
+            axQueue.async { d.el.setPosition(origin) }
+            return
+        }
+        let (minW, minH): (CGFloat, CGFloat) = (120, 80)
+        if d.leftEdge {
+            f.origin.x = min(f.minX + dx, f.maxX - minW)
+            f.size.width = d.startFrame.maxX - f.minX
+        } else {
+            f.size.width = max(minW, f.width + dx)
+        }
+        if d.topEdge {
+            f.origin.y = min(f.minY + dy, f.maxY - minH)
+            f.size.height = d.startFrame.maxY - f.minY
+        } else {
+            f.size.height = max(minH, f.height + dy)
+        }
+        if d.floating {
+            let frame = f
+            axQueue.async { d.el.setFrame(frame) }
+        } else {
+            // Tiled: turn the dragged edges into split weights and re-layout live.
+            model.userResized(d.id, to: f)
+            apply(warp: false)
+        }
+    }
+
+    private func modDragEnded(at p: CGPoint) {
+        guard let d = modDrag else { return }
+        modDragMoved(to: p)
+        modDrag = nil
+        dragged.removeAll()  // our own frame writes during the drag aren't user drags
+        if d.floating {
+            axQueue.async { [weak self] in
+                guard let f = d.el.frame else { return }
+                DispatchQueue.main.async {
+                    self?.model.floatingWindowDropped(d.id, frame: f)
+                    self?.scheduleApply()
+                }
+            }
+        } else if !d.resize {
+            model.userDropped(d.id, at: p)  // swap with the window underneath, or snap back
+            lastApplied[d.id] = nil
+        }
+        scheduleApply()
+        startSync()
+    }
+
+    /// Topmost managed window under `p`.
+    private func window(under p: CGPoint) -> (WindowID, AXUIElement)? {
+        // AX hit test is exact but must never reach our own process (menu bar item), so stay inside work areas.
+        if model.monitors.contains(where: { $0.visibleFrame.contains(p) }) {
+            var hit: AXUIElement?
+            if AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), Float(p.x), Float(p.y), &hit) == .success,
+               let hit, let win = hit.role == kAXWindowRole ? hit : hit.element(kAXWindowAttribute),
+               let id = win.windowID, model.windows[id] != nil, let el = elements[id] {
+                return (id, el)
+            }
+        }
+        if let w = model.window(at: p), let el = elements[w.id] { return (w.id, el) }
+        return nil
+    }
+
+    // MARK: Window discovery
+
+    private enum SyncScope {
+        case apps(Set<pid_t>), all
+
+        func union(_ o: SyncScope?) -> SyncScope {
+            switch (self, o) {
+            case (.all, _), (_, .all?): return .all
+            case (.apps(let a), .apps(let b)?): return .apps(a.union(b))
+            case (_, nil): return self
+            }
+        }
+
+        func contains(_ pid: pid_t) -> Bool {
+            if case .apps(let s) = self { return s.contains(pid) }
+            return true
+        }
+    }
+
+    private struct SyncResult {
+        var seen: [WindowID: Seen] = [:]
+        var minimized = Set<WindowID>()
+        var hiddenPids = Set<pid_t>()
+        var failedPids = Set<pid_t>()  // app didn't answer: keep its windows as they are
+        var goneApps = Set<pid_t>()
+        var server: [WindowID: Bool]?  // window → on screen; nil when the window server didn't answer
+        var newTrackers: [pid_t: AppTracker] = [:]
+    }
+
+    private struct Seen {
+        let el: AXUIElement
+        let pid: pid_t
+        let info: WindowInfo?  // nil for windows the model already knew when the scan started
+        let kind: WindowKind
+    }
+
+    func scheduleApply() {
+        guard !applyQueued else { return }
+        applyQueued = true
+        DispatchQueue.main.async { [self] in
+            applyQueued = false
+            if tap.isMouseDown || modDrag != nil { return }  // never fight a drag; mouse-up applies
+            apply()
+        }
+    }
+
+    private func requestSync(_ scope: SyncScope) {
+        syncScope = scope.union(syncScope)
+        startSync()
+    }
+
+    /// Enumerates windows of the apps in scope off the main thread (one thread per app), then diffs on main.
+    private func startSync() {
+        guard !syncInFlight, let scope = syncScope, !tap.isMouseDown, modDrag == nil else { return }
+        syncScope = nil
+        syncInFlight = true
+        let me = getpid()
+        let regular = { (a: NSRunningApplication) in
+            a.activationPolicy == .regular && a.processIdentifier != me && !a.isTerminated
+        }
+        let candidates: [NSRunningApplication]
+        var goneApps = Set<pid_t>()
+        switch scope {
+        case .all:
+            candidates = NSWorkspace.shared.runningApplications.filter(regular)
+            let live = Set(candidates.map(\.processIdentifier))
+            for pid in Set(trackers.keys).union(pids.values) where !live.contains(pid) {
+                trackers[pid] = nil
+                goneApps.insert(pid)
+            }
+        case .apps(let set):
+            candidates = set.compactMap { NSRunningApplication(processIdentifier: $0) }.filter(regular)
+            for pid in set where !candidates.contains(where: { $0.processIdentifier == pid }) {
+                trackers[pid] = nil
+                goneApps.insert(pid)
+            }
+        }
+        let existing = trackers
+        let known = model.windows.mapValues(\.isFloating)
+        let refcon = refcon
+        let started = DispatchTime.now().uptimeNanoseconds
+        syncQueue.async { [weak self] in
+            // An empty snapshot means the window server isn't answering (e.g. after wake); don't drop everything.
+            let server = windowServerSnapshot()
+            let lock = NSLock()
+            var result = SyncResult()
+            result.goneApps = goneApps
+            result.server = server.isEmpty ? nil : server.mapValues(\.onscreen)
+            DispatchQueue.concurrentPerform(iterations: candidates.count) { i in
+                let app = candidates[i]
+                let pid = app.processIdentifier
+                if app.isHidden {
+                    lock.withLock { _ = result.hiddenPids.insert(pid) }
+                    return
+                }
+                guard let t = existing[pid] ?? AppTracker(app, refcon: refcon),
+                      let windows = t.element.windowsIfAvailable else {
+                    lock.withLock { _ = result.failedPids.insert(pid) }
+                    return
+                }
+                let name = app.localizedName ?? ""
+                let bundle = app.bundleIdentifier ?? ""
+                var local: [WindowID: Seen] = [:]
+                var localMinimized: [WindowID] = []
+                for w in windows {
+                    guard let id = w.windowID, server.isEmpty || server[id] != nil else { continue }
+                    if w.isMinimized {
+                        localMinimized.append(id)
+                        continue
+                    }
+                    if let floating = known[id] {
+                        local[id] = Seen(el: w, pid: pid, info: nil, kind: floating ? .float : .tile)
+                        continue
+                    }
+                    let kind = classify(w, bundleID: bundle, layer: server[id]?.layer)
+                    guard kind != .ignore else { continue }
+                    t.watch(w, id: id, refcon: refcon)
+                    local[id] = Seen(el: w, pid: pid, info: WindowInfo(app: name, bundleID: bundle, title: w.title, pid: pid),
+                                     kind: kind)
+                }
+                lock.withLock {
+                    result.seen.merge(local) { a, _ in a }
+                    result.minimized.formUnion(localMinimized)
+                    if existing[pid] == nil { result.newTrackers[pid] = t }
+                }
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if self.debug {
+                    log(String(format: "sync %@ %d windows in %.2f ms (off main), unanswered: %@", "\(scope)",
+                               result.seen.count, Double(DispatchTime.now().uptimeNanoseconds - started) / 1e6,
+                               "\(result.failedPids)"))
+                }
+                self.finishSync(scope, result)
+            }
+        }
+    }
+
+    private func finishSync(_ scope: SyncScope, _ r: SyncResult) {
+        syncInFlight = false
+        let seen = r.seen
+        for (pid, t) in r.newTrackers where trackers[pid] == nil { trackers[pid] = t }
+        for id in seen.keys { missing[id] = nil }
+        for id in Array(model.windows.keys) where seen[id] == nil {
+            guard let pid = pids[id], scope.contains(pid) || r.goneApps.contains(pid) else { continue }
+            if r.failedPids.contains(pid) { continue }  // app didn't answer this time; nothing changed
+            // Gone from its app's list and either unknown to the window server or still on screen
+            // (playing its close animation): closed. Off screen means another Space: wait (below).
+            let gone = r.goneApps.contains(pid) || r.server.map { $0[id] ?? true } ?? false
+            if gone {
+                park(id)  // in case it was a glitch and comes back: same workspace
+                forget(id)
+            } else if r.minimized.contains(id) || r.hiddenPids.contains(pid) {
+                park(id)
+                forget(id)
+            } else {
+                // Still exists but unlisted: a glitch or another macOS Space. Give it a few syncs.
+                missing[id, default: 0] += 1
+                if missing[id]! >= 3 {
+                    park(id)
+                    forget(id)
+                }
+            }
+        }
+        if let s = r.server { for id in parked.keys where s[id] == nil { parked[id] = nil } }
+
+        // Restored windows keep their saved order; new ones follow by ID.
+        var saved: [WindowID: (Int, Session.Entry)] = [:]
+        if let s = restoring {
+            for (i, e) in s.windows.enumerated() { saved[e.id] = (i, e) }
+        }
+        var added: [WindowID] = []
+        let order = seen.keys.sorted { (saved[$0]?.0 ?? Int.max, $0) < (saved[$1]?.0 ?? Int.max, $1) }
+        for id in order {
+            let s = seen[id]!
+            elements[id] = s.el
+            pids[id] = s.pid
+            guard model.windows[id] == nil, let info = s.info else { continue }
+            if let p = parked.removeValue(forKey: id) {
+                model.addWindow(id, info: info, floating: p.floating, frame: nil, workspaceName: p.workspace)
+                continue
+            }
+            if let e = saved[id]?.1, e.bundle == info.bundleID {
+                model.addWindow(id, info: info, floating: e.floating, frame: nil,
+                                workspaceName: e.workspace ?? model.focusedWorkspace.name)
+                if e.workspace == nil { model.run("move scratchpad", on: id) }
+                continue  // rules already ran in the previous session
+            }
+            model.addWindow(id, info: info, floating: s.kind == .float, frame: s.el.frame, useMonitorOfFrame: startup)
+            added.append(id)
+        }
+        if startup, case .all = scope {
+            startup = false
+            lastFocused = nil
+            if let s = restoring { model.restoreFocus(workspace: s.focused) }
+            restoring = nil
+        }
+        for id in added {
+            for rule in model.config.rules {
+                guard let w = model.windows[id], rule.criteria.matches(w) else { continue }
+                perform(model.run(rule.command, on: id).effects)
+            }
+        }
+        for id in fullscreenOnReturn where model.windows[id] != nil {
+            fullscreenOnReturn.remove(id)
+            model.osFocused(id)
+            model.run("fullscreen enable", on: id)
+        }
+        if !added.isEmpty { refreshOSFocus() }
+        scheduleApply()
+        startSync()
+    }
+
+    private func park(_ id: WindowID) {
+        guard let w = model.windows[id], let ws = w.workspace else { return }
+        parked[id] = (ws.name, w.isFloating)
+    }
+
+    private func forget(_ id: WindowID) {
+        model.removeWindow(id)
+        if let pid = pids[id] { trackers[pid]?.unwatch(id) }
+        elements[id] = nil
+        pids[id] = nil
+        hiddenByUs.remove(id)
+        lastApplied[id] = nil
+        appliedSize[id] = nil
+        reappliedAt[id] = nil
+        missing[id] = nil
+        dragged[id] = nil
+        if lastFocused == id { lastFocused = nil }
+    }
+
+    // MARK: Apply
+
+    private enum Action {
+        /// `from` = the frame we last gave it, to order the writes so its edges never overshoot.
+        case frame(CGRect, positionOnly: Bool, from: CGRect?)
+        case center(in: CGRect)
+        case hide(MonitorID, knownWidth: CGFloat?, readFrame: Bool)
+    }
+
+    private struct Job {
+        let id: WindowID
+        let el: AXUIElement
+        let action: Action
+    }
+
+    /// Makes the real windows match the model. Bookkeeping happens here on main; the AX writes and the
+    /// focus change are queued in order on `axQueue`, so the main thread never waits for an app.
+    private func apply(warp: Bool = true) {
+        let placements = model.placements()
+        let fallback = model.focusedMonitor.visibleFrame
+        var show: [pid_t: [Job]] = [:]
+        var hide: [pid_t: [Job]] = [:]
+        for (id, p) in placements {
+            guard let el = elements[id], let pid = pids[id], let w = model.windows[id] else { continue }
+            let wasHidden = hiddenByUs.contains(id)
+            switch p {
+            case .tiled(let r):
+                if lastApplied[id] == r && !wasHidden { continue }
+                show[pid, default: []].append(Job(id: id, el: el, action: .frame(r, positionOnly: appliedSize[id] == r.size,
+                                                                                  from: wasHidden ? nil : lastApplied[id])))
+                lastApplied[id] = r
+                appliedSize[id] = r.size
+                hiddenByUs.remove(id)
+            case .floating(let f, let dirty):
+                if !dirty && !wasHidden { continue }
+                show[pid, default: []].append(Job(id: id, el: el, action: f.map { .frame($0, positionOnly: false, from: nil) } ?? .center(in: fallback)))
+                hiddenByUs.remove(id)
+                model.clearDirty(id)
+            case .hidden(let mid):
+                if wasHidden { continue }
+                hide[pid, default: []].append(Job(id: id, el: el, action: .hide(mid, knownWidth: appliedSize[id]?.width,
+                                                                                 readFrame: w.isFloating)))
+                hiddenByUs.insert(id)
+                lastApplied[id] = nil
+            }
+        }
+
+        var focusJob: (pid: pid_t, id: WindowID, el: AXUIElement, gen: Int)?
+        if let f = model.focusedWindow {
+            if f.id != lastFocused, let el = elements[f.id], let pid = pids[f.id] {
+                lastFocused = f.id
+                pendingFocus = (f.id, Date().addingTimeInterval(0.6))
+                focusJob = (pid, f.id, el, focusGeneration.increment())
+            }
+        } else if lastFocused != nil {
+            // Empty workspace: take keyboard focus away from windows that are now parked off-screen.
+            lastFocused = nil
+            _ = focusGeneration.increment()
+            NSApp.activate(ignoringOtherApps: true)
+        }
+
+        if !show.isEmpty || !hide.isEmpty || focusJob != nil {
+            let monitors = model.monitors
+            let generation = focusGeneration
+            let queue = axQueue
+            // Where the shown windows are headed, to know when they've actually arrived.
+            var arriving: [WindowID: CGPoint] = [:]
+            if model.config.smoothLayout && !hide.isEmpty {
+                for job in show.values.joined() {
+                    if case .frame(let r, _, _) = job.action { arriving[job.id] = r.origin }
+                }
+            }
+            axQueue.async { [weak self] in
+                var floating = WindowManager.write(show, monitors: monitors)
+                // Park the old workspace only once the new one is really on screen; otherwise apps that are slow
+                // to move (tens of ms) leave a frame of bare desktop in between: the "flicker".
+                WindowManager.waitUntilShown(arriving, timeout: 0.08)
+                floating += WindowManager.write(hide, monitors: monitors)
+                if let fj = focusJob {
+                    Focus.focus(pid: fj.pid, windowID: fj.id, element: fj.el)
+                    // Tahoe sometimes leaves another app's window on top; raise once more unless focus moved on.
+                    queue.asyncAfter(deadline: .now() + 0.12) {
+                        if generation.value == fj.gen { fj.el.perform(kAXRaiseAction) }
+                    }
+                }
+                if !floating.isEmpty {
+                    DispatchQueue.main.async { for (id, f) in floating { self?.model.syncFloatingFrame(id, f) } }
+                }
+            }
+        }
+
+        let m = model.focusedMonitor
+        if warp, model.config.mouseWarping, let last = lastFocusedMonitor, last != m.id,
+           let cursor = CGEvent(source: nil)?.location, !m.frame.contains(cursor) {
+            let r = model.focusedWindow.map { $0.isFloating ? ($0.floatingFrame ?? $0.rect) : $0.rect } ?? m.visibleFrame
+            CGWarpMouseCursorPosition(CGPoint(x: r.midX, y: r.midY))
+            CGAssociateMouseAndMouseCursorPosition(1)
+        }
+        lastFocusedMonitor = m.id
+        updateBorder()
+        updateStatus()
+    }
+
+    /// Runs on `axQueue`. One thread per app; returns the frames of floating windows read before hiding them.
+    private static func write(_ groups: [pid_t: [Job]], monitors: [Monitor]) -> [(WindowID, CGRect)] {
+        guard !groups.isEmpty else { return [] }
+        let list = Array(groups)
+        let lock = NSLock()
+        var floatingFrames: [(WindowID, CGRect)] = []
+        DispatchQueue.concurrentPerform(iterations: list.count) { i in
+            let (pid, jobs) = list[i]
+            let app = AXUIElement.app(pid)
+            // Some apps animate frame changes while this is on (set by e.g. VoiceOver/Magnet).
+            let enhanced = app.bool("AXEnhancedUserInterface") == true
+            if enhanced { app.set("AXEnhancedUserInterface", false) }
+            var local: [(WindowID, CGRect)] = []
+            for job in jobs {
+                switch job.action {
+                case .frame(let r, let positionOnly, let from):
+                    if positionOnly {
+                        job.el.setPosition(r.origin)
+                    } else if let f = from, sameMonitor(f, r, monitors) {
+                        // Growing: move first, then grow into place. Shrinking: shrink first, then move.
+                        // Either way the window never pokes past its final edges mid-change.
+                        if r.width > f.width || r.height > f.height {
+                            job.el.setPosition(r.origin)
+                            job.el.setSize(r.size)
+                        } else {
+                            job.el.setSize(r.size)
+                            job.el.setPosition(r.origin)
+                        }
+                    } else {
+                        job.el.setFrame(r)  // new or crossing monitors: size → position → size
+                    }
+                case .center(let v):
+                    if let s = job.el.size {
+                        job.el.setPosition(CGPoint(x: v.midX - s.width / 2, y: v.midY - s.height / 2))
+                    }
+                case .hide(let mid, let knownWidth, let readFrame):
+                    if readFrame, let f = job.el.frame { local.append((job.id, f)) }
+                    job.el.setPosition(hidePoint(mid, monitors: monitors) { knownWidth ?? job.el.size?.width ?? 0 })
+                }
+            }
+            if enhanced { app.set("AXEnhancedUserInterface", true) }
+            if !local.isEmpty { lock.withLock { floatingFrames += local } }
+        }
+        return floatingFrames
+    }
+
+    /// Polls the window server (cheap, no app round trip) until every window is at its target origin.
+    private static func waitUntilShown(_ targets: [WindowID: CGPoint], timeout: TimeInterval) {
+        guard !targets.isEmpty else { return }
+        var ptrs = targets.keys.map { UnsafeRawPointer(bitPattern: UInt($0)) }
+        guard let ids = CFArrayCreate(nil, &ptrs, ptrs.count, nil) else { return }
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            guard let list = CGWindowListCreateDescriptionFromArray(ids) as? [[String: Any]] else { return }
+            let arrived = list.filter { d in
+                guard let n = d[kCGWindowNumber as String] as? Int, let target = targets[WindowID(n)],
+                      let b = d[kCGWindowBounds as String] as? [String: CGFloat], let x = b["X"], let y = b["Y"] else { return false }
+                return abs(x - target.x) < 2 && abs(y - target.y) < 2
+            }
+            if arrived.count >= targets.count { return }
+            usleep(2_000)
+        } while Date() < deadline
+    }
+
+    private func updateBorder() {
+        let c = model.config
+        guard c.borderWidth > 0, let f = model.focusedWindow, model.focusedWorkspace.fullscreen !== f,
+              !tap.isMouseDown, modDrag == nil, let el = elements[f.id] else { return border.hide() }
+        let (id, width, radius, color) = (f.id, c.borderWidth, c.borderRadius, c.borderColor)
+        axQueue.async { [weak self] in  // after the queued moves, so we read the final frame
+            let frame = el.frame
+            DispatchQueue.main.async {
+                guard let self, let frame, self.model.focusedWindow?.id == id else { return }
+                self.border.show(around: frame, width: width, radius: radius, color: color)
+            }
+        }
+    }
+
+    func updateStatus() {
+        statusBar.update(model: model, secureInput: secureInput, spacesWarning: spacesWarning)
+    }
+
+    // MARK: macOS Spaces
+
+    private var spaces = Spaces.Summary()
+    private var warnedAboutDesktops = false
+
+    /// Why tiling can't see some windows right now, or nil.
+    var spacesWarning: String? {
+        var parts: [String] = []
+        if spaces.extraDesktops > 0 {
+            parts.append("You have \(spaces.extraDesktops + 1) macOS desktops. Windows on the other desktops can't be tiled. "
+                         + "Close the extra ones in Mission Control: zspace workspaces (Caps+1…9) replace them.")
+        }
+        if spaces.fullscreenApps > 0 {
+            parts.append("\(spaces.fullscreenApps) app(s) are in macOS full screen, outside tiling. Exit it (⌃⌘F) — "
+                         + "zspace fullscreen (Caps+F) keeps them tiled.")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: "\n\n")
+    }
+
+    private func checkSpaces() {
+        let s = Spaces.summary()
+        defer {
+            if s != spaces {
+                spaces = s
+                updateStatus()
+            }
+        }
+        // An app went into macOS full screen (green button, menu, or before zspace started): bring it back to
+        // the desktop and use zspace fullscreen instead, so it stays tiled and navigable.
+        if model.config.interceptNativeFullscreen {
+            for fs in s.fullscreenWindows where !pullingBack.contains(fs.window) { pullBack(fs) }
+        }
+        if s.extraDesktops > 0, !warnedAboutDesktops {
+            warnedAboutDesktops = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.showDesktopsAlert() }
+        }
+    }
+
+    private var pullingBack = Set<CGWindowID>()
+    /// Windows that left macOS full screen and get zspace fullscreen as soon as they're back in the layout.
+    private var fullscreenOnReturn = Set<CGWindowID>()
+
+    private func pullBack(_ fs: Spaces.FullscreenWindow) {
+        pullingBack.insert(fs.window)
+        let cached = elements[fs.window]
+        eventQueue.async { [weak self] in
+            // A window on another Space usually isn't listed; the cached element or the app's own list may still work.
+            func find() -> AXUIElement? {
+                cached ?? AXUIElement.app(fs.pid).windowsIfAvailable?.first { $0.windowID == fs.window }
+            }
+            var el = find()
+            if el == nil {
+                // Not reachable from here: let macOS switch to it, then ask the app for its focused window.
+                DispatchQueue.main.sync { _ = NSRunningApplication(processIdentifier: fs.pid)?.activate() }
+                Thread.sleep(forTimeInterval: 0.8)
+                el = AXUIElement.app(fs.pid).focusedWindow.flatMap { $0.windowID == fs.window ? $0 : nil } ?? find()
+            }
+            el?.set("AXFullScreen", false)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {  // macOS's exit animation
+                guard let self else { return }
+                self.pullingBack.remove(fs.window)
+                guard el != nil else { return log("couldn't bring window \(fs.window) out of macOS full screen") }
+                self.fullscreenOnReturn.insert(fs.window)
+                self.lastApplied[fs.window] = nil
+                self.appliedSize[fs.window] = nil
+                self.requestSync(.all)
+            }
+        }
+    }
+
+    private var alertPanel: AlertPanel?
+
+    /// Not modal: a modal alert would block the main thread, and with it every shortcut.
+    func showDesktopsAlert() {
+        guard let text = spacesWarning, alertPanel == nil else { return }
+        alertPanel = AlertPanel(
+            title: "zspace works best with one desktop",
+            text: text + "\n\nIn Mission Control, hover the row at the top and click × on the extra desktops. "
+                + "Their windows move to the desktop you keep.",
+            buttons: [
+                ("Open Mission Control", {
+                    Process.launchedProcess(launchPath: "/System/Applications/Mission Control.app/Contents/MacOS/Mission Control",
+                                            arguments: [])
+                }),
+                ("Later", {}),
+            ],
+            onClose: { [weak self] in self?.alertPanel = nil })
+    }
+}
+
+/// Where to park a window so ~1px stays on its monitor (macOS refuses fully off-screen frames).
+/// Bottom-right unless that corner touches another display; `width` is only read for bottom-left.
+func hidePoint(_ id: MonitorID, monitors: [Monitor], width: () -> CGFloat) -> CGPoint {
+    guard let m = monitors.first(where: { $0.id == id }) ?? monitors.first else { return .zero }
+    let v = m.visibleFrame
+    func hit(_ x: CGFloat, _ y: CGFloat) -> Int { monitors.contains { $0.id != m.id && $0.frame.contains(CGPoint(x: x, y: y)) } ? 1 : 0 }
+    let right = hit(v.maxX + 2, v.maxY - 2) + hit(v.maxX - 2, v.maxY + 2) + 10 * hit(v.maxX + 2, v.maxY + 2)
+    let left = hit(v.minX - 2, v.maxY - 2) + hit(v.minX + 2, v.maxY + 2) + 10 * hit(v.minX - 2, v.maxY + 2)
+    return right <= left ? CGPoint(x: v.maxX - 1, y: v.maxY - 1) : CGPoint(x: v.minX + 1 - width(), y: v.maxY - 1)
+}
+
+/// An NSAlert shown as a floating window instead of modally, so zspace keeps responding while it's up.
+final class AlertPanel: NSObject {
+    private let alert = NSAlert()
+    private var actions: [() -> Void] = []
+    private let onClose: () -> Void
+
+    init(title: String, text: String, buttons: [(String, () -> Void)], onClose: @escaping () -> Void) {
+        self.onClose = onClose
+        super.init()
+        alert.messageText = title
+        alert.informativeText = text
+        for (i, (label, action)) in buttons.enumerated() {
+            let b = alert.addButton(withTitle: label)
+            b.tag = i
+            b.target = self
+            b.action = #selector(pressed(_:))
+            actions.append(action)
+        }
+        alert.layout()
+        alert.window.level = .floating
+        alert.window.center()
+        NSApp.activate(ignoringOtherApps: true)
+        alert.window.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func pressed(_ sender: NSButton) {
+        alert.window.orderOut(nil)
+        actions[sender.tag]()
+        onClose()
+    }
+}
+
+/// Both frames' centers are on the same monitor.
+private func sameMonitor(_ a: CGRect, _ b: CGRect, _ monitors: [Monitor]) -> Bool {
+    let m = { (r: CGRect) in monitors.first { $0.frame.contains(CGPoint(x: r.midX, y: r.midY)) }?.id }
+    return m(a) != nil && m(a) == m(b)
+}
