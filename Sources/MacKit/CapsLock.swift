@@ -2,18 +2,18 @@ import CoreGraphics
 import Foundation
 
 /// Caps Lock as a modifier. macOS's built-in `hidutil` remaps Caps Lock to F18 (a key no app uses);
-/// zspace and Caps treat a held F18 as the `caps` modifier. The mapping lasts until reboot. Both apps
+/// panespace and Caps treat a held F18 as the `caps` modifier. The mapping lasts until reboot. Both apps
 /// can hold it at once: an owners file (live PIDs) decides when Caps Lock is given back. Main thread only.
 public enum CapsLock {
     public static let f18KeyCode: CGKeyCode = 0x4F
     /// `eventSourceUserData` on a key/mouse event Caps passed on while Caps Lock is held.
     public static let heldTag: Int64 = 0x5A53_4341_5053_0001
-    /// `eventSourceUserData` on an event Caps generated itself (a remapped key); zspace leaves these alone.
+    /// `eventSourceUserData` on an event Caps generated itself (a remapped key); panespace leaves these alone.
     public static let syntheticTag: Int64 = 0x5A53_4341_5053_0002
 
     private static let capsUsage: UInt64 = 0x7_0000_0039  // keyboard page, Caps Lock
     private static let f18Usage: UInt64 = 0x7_0000_006D   // keyboard page, F18
-    private static let ownersPath = "/tmp/zspace-\(getuid())-capslock-owners"
+    private static let ownersPath = "/tmp/panespace-\(getuid())-capslock-owners"
 
     /// The (remapped) Caps key is down right now, per the keyboard hardware state. Reliable even though
     /// the key's own events are swallowed, and can't get stuck the way tracking key-up events can.

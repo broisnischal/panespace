@@ -21,7 +21,7 @@ define bundle
 	mkdir -p $(1).app/Contents/MacOS
 	cp .build/release/$(2) $(1).app/Contents/MacOS/$(2)
 	cp Resources/$(3) $(1).app/Contents/Info.plist
-	codesign --force --sign "$(SIGN_ID)" --identifier dev.zspace.$(1) $(1).app
+	codesign --force --sign "$(SIGN_ID)" --identifier app.panespace.$(1) $(1).app
 endef
 
 # $(call agent,Name,executable): launchd agent that starts Name.app at login.
@@ -30,45 +30,45 @@ define agent
 	printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' \
 	  '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
 	  '<plist version="1.0"><dict>' \
-	  '<key>Label</key><string>dev.zspace.$(1)</string>' \
+	  '<key>Label</key><string>app.panespace.$(1)</string>' \
 	  '<key>ProgramArguments</key><array><string>$(APPS_DIR)/$(1).app/Contents/MacOS/$(2)</string></array>' \
 	  '<key>RunAtLoad</key><true/>' \
 	  '<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>' \
 	  '<key>StandardErrorPath</key><string>$(HOME)/Library/Logs/$(2).log</string>' \
-	  '</dict></plist>' > $(AGENTS)/dev.zspace.$(1).plist
-	launchctl bootout gui/$$(id -u) $(AGENTS)/dev.zspace.$(1).plist 2>/dev/null || true
-	launchctl bootstrap gui/$$(id -u) $(AGENTS)/dev.zspace.$(1).plist
+	  '</dict></plist>' > $(AGENTS)/app.panespace.$(1).plist
+	launchctl bootout gui/$$(id -u) $(AGENTS)/app.panespace.$(1).plist 2>/dev/null || true
+	launchctl bootstrap gui/$$(id -u) $(AGENTS)/app.panespace.$(1).plist
 endef
 
 app: build
-	$(call bundle,ZSpace,zspace,Info.plist)
+	$(call bundle,Panespace,panespace,Info.plist)
 	$(call bundle,Caps,caps,Caps-Info.plist)
-	@echo "built ZSpace.app and Caps.app (signed: $(SIGN_ID))"
+	@echo "built Panespace.app and Caps.app (signed: $(SIGN_ID))"
 
 install: app
 	mkdir -p $(APPS_DIR) $(BIN_DIR)
-	rm -rf $(APPS_DIR)/ZSpace.app $(APPS_DIR)/Caps.app
-	cp -R ZSpace.app Caps.app $(APPS_DIR)/
-	ln -sf $(APPS_DIR)/ZSpace.app/Contents/MacOS/zspace $(BIN_DIR)/zspace
+	rm -rf $(APPS_DIR)/Panespace.app $(APPS_DIR)/Caps.app
+	cp -R Panespace.app Caps.app $(APPS_DIR)/
+	ln -sf $(APPS_DIR)/Panespace.app/Contents/MacOS/panespace $(BIN_DIR)/panespace
 	ln -sf $(APPS_DIR)/Caps.app/Contents/MacOS/caps $(BIN_DIR)/caps
-	@echo "installed $(APPS_DIR)/ZSpace.app and $(APPS_DIR)/Caps.app; CLIs in $(BIN_DIR)"
-	@echo "start: open $(APPS_DIR)/ZSpace.app $(APPS_DIR)/Caps.app   (grant Accessibility to each when asked)"
+	@echo "installed $(APPS_DIR)/Panespace.app and $(APPS_DIR)/Caps.app; CLIs in $(BIN_DIR)"
+	@echo "start: open $(APPS_DIR)/Panespace.app $(APPS_DIR)/Caps.app   (grant Accessibility to each when asked)"
 
 login-item:
-	$(call agent,ZSpace,zspace)
-	@echo "zspace now starts at login (log: ~/Library/Logs/zspace.log)"
+	$(call agent,Panespace,panespace)
+	@echo "panespace now starts at login (log: ~/Library/Logs/panespace.log)"
 
 caps-login-item:
 	$(call agent,Caps,caps)
 	@echo "Caps now starts at login (log: ~/Library/Logs/caps.log)"
 
 no-login-item:
-	for a in ZSpace Caps; do launchctl bootout gui/$$(id -u) $(AGENTS)/dev.zspace.$$a.plist 2>/dev/null; rm -f $(AGENTS)/dev.zspace.$$a.plist; done; true
+	for a in Panespace Caps; do launchctl bootout gui/$$(id -u) $(AGENTS)/app.panespace.$$a.plist 2>/dev/null; rm -f $(AGENTS)/app.panespace.$$a.plist; done; true
 
 uninstall: no-login-item
-	-$(BIN_DIR)/zspace exit 2>/dev/null
+	-$(BIN_DIR)/panespace exit 2>/dev/null
 	-pkill -x caps
-	rm -rf $(APPS_DIR)/ZSpace.app $(APPS_DIR)/Caps.app $(BIN_DIR)/zspace $(BIN_DIR)/caps
+	rm -rf $(APPS_DIR)/Panespace.app $(APPS_DIR)/Caps.app $(BIN_DIR)/panespace $(BIN_DIR)/caps
 
 clean:
-	rm -rf .build ZSpace.app Caps.app
+	rm -rf .build Panespace.app Caps.app

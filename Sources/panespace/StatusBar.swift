@@ -1,6 +1,6 @@
 import AppKit
 import CoreText
-import ZSpaceCore
+import PanespaceCore
 
 /// Menu bar indicator. Drawn as a template image so macOS tints it exactly like its own icons
 /// (light/dark, Tahoe's translucent menu bar). Clicking opens a menu of workspaces and settings.
@@ -33,10 +33,10 @@ final class StatusBar: NSObject, NSMenuDelegate {
         renderedKey = key
         button.image = WorkspaceIcon.render(slots: slots, mode: mode, secureInput: secureInput, warning: warn, look: look)
         let focused = model.focusedWorkspace.name
-        button.setAccessibilityLabel("zspace, workspace \(focused)" + (mode.map { ", \($0) mode" } ?? ""))
+        button.setAccessibilityLabel("panespace, workspace \(focused)" + (mode.map { ", \($0) mode" } ?? ""))
         button.toolTip = spacesWarning
-            ?? (secureInput ? "Secure Input is on (a password field is focused), so macOS is withholding keystrokes from zspace."
-                            : "zspace — workspace \(focused)")
+            ?? (secureInput ? "Secure Input is on (a password field is focused), so macOS is withholding keystrokes from panespace."
+                            : "panespace — workspace \(focused)")
     }
 
     // MARK: Menu
@@ -82,7 +82,7 @@ final class StatusBar: NSObject, NSMenuDelegate {
             menu.addItem(menuItem("Config Warnings (\(manager.configWarnings.count))…", #selector(showWarnings)))
         }
         menu.addItem(.separator())
-        menu.addItem(menuItem("Quit zspace", #selector(quit), shortcut: "exit"))
+        menu.addItem(menuItem("Quit panespace", #selector(quit), shortcut: "exit"))
     }
 
     private func header(_ title: String) -> NSMenuItem {
@@ -127,7 +127,7 @@ final class StatusBar: NSObject, NSMenuDelegate {
 
     @objc private func showWarnings() {
         let alert = NSAlert()
-        alert.messageText = "zspace config warnings"
+        alert.messageText = "panespace config warnings"
         alert.informativeText = manager?.configWarnings.joined(separator: "\n") ?? ""
         NSApp.activate(ignoringOtherApps: true)
         alert.runModal()

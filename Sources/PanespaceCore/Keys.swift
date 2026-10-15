@@ -5,7 +5,7 @@ public struct Modifiers: OptionSet, Hashable {
     public static let control = Modifiers(rawValue: 2)
     public static let option = Modifiers(rawValue: 4)
     public static let command = Modifiers(rawValue: 8)
-    /// Caps Lock used as a modifier (zspace remaps it to F18 and tracks it).
+    /// Caps Lock used as a modifier (panespace remaps it to F18 and tracks it).
     public static let caps = Modifiers(rawValue: 16)
 
     /// i3 and macOS spellings. Mod1 = alt, Mod4 = super = cmd, as on X11.

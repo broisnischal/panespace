@@ -1,6 +1,6 @@
 import AppKit
 import CapsCore
-import ZSpaceCore
+import PanespaceCore
 
 /// The built-in `do …` actions. Main thread.
 enum Specials {

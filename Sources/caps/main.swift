@@ -10,7 +10,7 @@ USAGE
   caps check-config [path]   parse a config and print warnings
 
 Hold Caps Lock and press a key: bindings for the frontmost app run first, then global ones;
-anything else goes to zspace as Caps+key. Tap Caps alone for Escape.
+anything else goes to panespace as Caps+key. Tap Caps alone for Escape.
 Config: \(capsConfigURL().path)
 """
 
@@ -37,7 +37,7 @@ var signalSources: [DispatchSourceSignal] = []
 let args = Array(CommandLine.arguments.dropFirst())
 switch args.first {
 case nil:
-    let others = NSRunningApplication.runningApplications(withBundleIdentifier: "dev.zspace.Caps")
+    let others = NSRunningApplication.runningApplications(withBundleIdentifier: "app.panespace.Caps")
         .filter { $0.processIdentifier != getpid() }
     if !others.isEmpty {
         fputs("caps: already running\n", stderr)

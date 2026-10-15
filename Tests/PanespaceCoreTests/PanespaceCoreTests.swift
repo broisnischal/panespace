@@ -1,6 +1,6 @@
 import CoreGraphics
 import XCTest
-@testable import ZSpaceCore
+@testable import PanespaceCore
 
 private let mon1 = Monitor(id: 1, name: "Built-in", frame: CGRect(x: 0, y: 0, width: 1000, height: 500),
                            visibleFrame: CGRect(x: 0, y: 0, width: 1000, height: 500), isMain: true)

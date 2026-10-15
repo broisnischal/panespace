@@ -27,7 +27,7 @@ public struct Config {
     public var focusWrapping = true
     public var accordionPadding: CGFloat = 30
     public var floatingModifier: Modifiers?
-    /// ⌃⌘F / Globe+F and the green button use zspace fullscreen instead of a macOS full-screen Space
+    /// ⌃⌘F / Globe+F and the green button use panespace fullscreen instead of a macOS full-screen Space
     /// (windows on other Spaces can't be tiled). `native_fullscreen macos` turns this off.
     public var interceptNativeFullscreen = true
     /// Switching workspaces shows the new windows before parking the old ones, so the bare desktop never flashes.

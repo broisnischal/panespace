@@ -1,5 +1,5 @@
 import Foundation
-import ZSpaceCore
+import PanespaceCore
 
 /// What Caps+key does.
 public enum CapsAction: Equatable, CustomStringConvertible {
@@ -12,8 +12,8 @@ public enum CapsAction: Equatable, CustomStringConvertible {
     case url(String)
     /// Type text.
     case text(String)
-    /// Run a zspace command.
-    case zspace(String)
+    /// Run a panespace command.
+    case panespace(String)
     /// Run an Apple Shortcut by name.
     case shortcut(String)
     /// A built-in: media keys, screenshot, lock, dark mode, …
@@ -28,7 +28,7 @@ public enum CapsAction: Equatable, CustomStringConvertible {
         case .exec(let c): return "exec \(c)"
         case .url(let u): return "url \(u)"
         case .text(let t): return "text \"\(t)\""
-        case .zspace(let c): return "zspace \(c)"
+        case .panespace(let c): return "panespace \(c)"
         case .shortcut(let n): return "shortcut \(n)"
         case .special(let s): return "do \(s.rawValue)"
         case .nothing: return "nothing"
@@ -45,7 +45,7 @@ public enum CapsAction: Equatable, CustomStringConvertible {
 ///     }
 ///
 /// Combos name the key plus any extra modifiers ("j", "shift+j"); Caps itself is implied.
-/// Keys without a binding pass on to zspace, which sees them as Caps+key.
+/// Keys without a binding pass on to panespace, which sees them as Caps+key.
 public struct CapsConfig {
     public struct AppLayer {
         public let pattern: String
@@ -189,7 +189,7 @@ public struct CapsConfig {
         case "exec": return .exec(try need())
         case "url": return .url(unquote(try need()))
         case "text": return .text(unquote(try need()).replacingOccurrences(of: "\\n", with: "\n"))
-        case "zspace": return .zspace(try need())
+        case "panespace": return .panespace(try need())
         case "shortcut": return .shortcut(unquote(try need()))
         case "do":
             guard let s = Special(rawValue: try need().lowercased()) else {
@@ -198,7 +198,7 @@ public struct CapsConfig {
             return .special(s)
         case "nothing", "none": return .nothing
         case "": throw ParseError("missing action")
-        default: throw ParseError("unknown action '\(verb)' (key, open, exec, url, text, zspace, shortcut, do, nothing)")
+        default: throw ParseError("unknown action '\(verb)' (key, open, exec, url, text, panespace, shortcut, do, nothing)")
         }
     }
 
@@ -283,8 +283,8 @@ public enum DefaultCapsConfig {
 #    Hold Caps on its own: the screen blurs and shows every Caps key for the app
 #    you're in (release to close).
 #    Bindings in an  app "…" { }  block only work in those apps and beat global ones.
-#    Keys you don't bind here go to zspace (Caps+H focus, Caps+1 workspace, …),
-#    so binding one of zspace's keys here takes it over.
+#    Keys you don't bind here go to panespace (Caps+H focus, Caps+1 workspace, …),
+#    so binding one of panespace's keys here takes it over.
 #
 #  KEYS
 #    a–z  0–9  f1–f20  return space tab escape backspace delete
@@ -298,7 +298,7 @@ public enum DefaultCapsConfig {
 #    exec <command>       run a shell command          exec say "hello"
 #    text "<text>"        type text  ("\n" = Return)   text "Thanks,\nNischal"
 #    shortcut "<name>"    run an Apple Shortcut        shortcut "Turn On Do Not Disturb"
-#    zspace <command>     run a zspace command         zspace workspace 3
+#    panespace <command>     run a panespace command         panespace workspace 3
 #    do <built-in>        one of the built-ins below   do screenshot
 #    nothing              swallow the key
 #
@@ -315,7 +315,7 @@ public enum DefaultCapsConfig {
 #    Text       paste-plain (paste without formatting)
 #    Caps       cheatsheet · edit-config · reload-config
 #
-#  zspace already uses these with Caps:
+#  panespace already uses these with Caps:
 #    H J K L ←↓↑→  (focus; +Shift = move)   1–0 (workspaces; +Shift = send window)
 #    A  B  V  E  F  R  S  W  Space  Tab  [  ]  -  Return  and a few Shift combos
 # ═══════════════════════════════════════════════════════════════════════════════

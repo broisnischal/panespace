@@ -1,6 +1,6 @@
 import CoreGraphics
 
-/// JSON-ready snapshots for `zspace msg -t get_tree` / `get_workspaces`.
+/// JSON-ready snapshots for `panespace msg -t get_tree` / `get_workspaces`.
 extension Model {
     public func workspacesJSON() -> [[String: Any]] {
         sortedWorkspaces.map { ws in

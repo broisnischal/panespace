@@ -51,7 +51,7 @@ public enum Command: Equatable {
     case floating(Toggle)
     case resize(ResizeArg)
     case balance
-    /// zspace: auto-hide the macOS menu bar and Dock so tiles use the whole screen (Omarchy-style).
+    /// panespace: auto-hide the macOS menu bar and Dock so tiles use the whole screen (Omarchy-style).
     case immersive(Toggle)
     case kill
     case reload

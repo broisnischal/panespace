@@ -1,14 +1,14 @@
 import AppKit
 import CapsCore
 import MacKit
-import ZSpaceCore
+import PanespaceCore
 
-/// The keyboard hook. Sits at the head of the event chain (zspace sits at the tail), on its own thread.
+/// The keyboard hook. Sits at the head of the event chain (panespace sits at the tail), on its own thread.
 ///
 /// While Caps (remapped to F18) is held:
 /// - a key bound for the frontmost app, or globally, runs its action and never reaches anyone else;
-/// - any other key is passed on tagged `CapsLock.heldTag`, so zspace treats it as Caps+key;
-/// - mouse events are tagged too, so Caps+drag works in zspace.
+/// - any other key is passed on tagged `CapsLock.heldTag`, so panespace treats it as Caps+key;
+/// - mouse events are tagged too, so Caps+drag works in panespace.
 /// Caps on its own (a quick tap) runs the `tap` action, Escape by default.
 final class CapsTap {
     var onAction: (CapsAction) -> Void = { _ in }
@@ -72,7 +72,7 @@ final class CapsTap {
             let down = type == .keyDown
             if code == CapsLock.f18KeyCode {
                 capsKey(down: down, isRepeat: event.getIntegerValueField(.keyboardEventAutorepeat) != 0)
-                return nil  // the Caps key itself never reaches zspace or apps
+                return nil  // the Caps key itself never reaches panespace or apps
             }
             if !down {
                 if let k = lock.withLock({ remapped.removeValue(forKey: code) }) {
@@ -93,7 +93,7 @@ final class CapsTap {
             }
             guard lookup.0 else { return pass }
             guard let action = lookup.1 else {
-                event.setIntegerValueField(.eventSourceUserData, value: CapsLock.heldTag)  // zspace's turn
+                event.setIntegerValueField(.eventSourceUserData, value: CapsLock.heldTag)  // panespace's turn
                 return pass
             }
             switch action {
@@ -109,7 +109,7 @@ final class CapsTap {
             }
             return nil
 
-        default:  // mouse: let zspace see Caps+drag
+        default:  // mouse: let panespace see Caps+drag
             if lock.withLock({ held }) { event.setIntegerValueField(.eventSourceUserData, value: CapsLock.heldTag) }
             return pass
         }
@@ -144,7 +144,7 @@ final class CapsTap {
         }
     }
 
-    /// Sends a keystroke tagged as ours, so neither this tap nor zspace's treats it as Caps+key.
+    /// Sends a keystroke tagged as ours, so neither this tap nor panespace's treats it as Caps+key.
     func post(_ k: KeyCombo, down: Bool) {
         guard let e = CGEvent(keyboardEventSource: source, virtualKey: k.keyCode, keyDown: down) else { return }
         var flags: CGEventFlags = []

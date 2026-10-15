@@ -1,7 +1,7 @@
 import AppKit
 import CapsCore
 import MacKit
-import ZSpaceCore
+import PanespaceCore
 
 private let logTime = ISO8601DateFormatter()
 
@@ -22,17 +22,17 @@ final class Caps: NSObject, NSMenuDelegate {
     private(set) var config = CapsConfig()
     private let tap = CapsTap()
     private let overlay = Overlay()
-    /// zspace's bindings for the cheat sheet; refreshed in the background each time Caps goes down.
-    private var zspaceBindings: [(KeyCombo, String)] = []
+    /// panespace's bindings for the cheat sheet; refreshed in the background each time Caps goes down.
+    private var panespaceBindings: [(KeyCombo, String)] = []
     private var item: NSStatusItem?
     private var watcher: DispatchSourceFileSystemObject?
-    private let ipcQueue = DispatchQueue(label: "caps.zspace")
+    private let ipcQueue = DispatchQueue(label: "caps.panespace")
 
     func start() {
         loadConfig()
         CapsLock.enable()
         tap.onAction = { [unowned self] in perform($0) }
-        tap.onCapsDown = { [unowned self] in refreshZspaceBindings() }
+        tap.onCapsDown = { [unowned self] in refreshPanespaceBindings() }
         tap.onHold = { [unowned self] in
             switch config.hold {
             case .cheatsheet: showCheatSheet()
@@ -70,11 +70,11 @@ final class Caps: NSObject, NSMenuDelegate {
         let front = NSWorkspace.shared.frontmostApplication
         let app = front?.localizedName ?? "this app"
         let sections = CheatSheet.sections(config: config, app: app, bundleID: front?.bundleIdentifier ?? "",
-                                           zspace: zspaceBindings)
+                                           panespace: panespaceBindings)
         overlay.show(sections: sections, app: app)
     }
 
-    private func refreshZspaceBindings() {
+    private func refreshPanespaceBindings() {
         ipcQueue.async { [weak self] in
             guard let resp = IPC.send(type: "get_bindings", payload: ""),
                   let rows = try? JSONSerialization.jsonObject(with: Data(resp.utf8)) as? [[String: String]] else { return }
@@ -82,7 +82,7 @@ final class Caps: NSObject, NSMenuDelegate {
                 guard let k = r["key"].flatMap({ KeyCombo.parse($0) }), let c = r["command"] else { return nil }
                 return (k, c)
             }
-            DispatchQueue.main.async { self?.zspaceBindings = parsed }
+            DispatchQueue.main.async { self?.panespaceBindings = parsed }
         }
     }
 
@@ -148,9 +148,9 @@ final class Caps: NSObject, NSMenuDelegate {
             if let u = URL(string: s) { NSWorkspace.shared.open(u) }
         case .text(let t):
             tap.type(t)
-        case .zspace(let cmd):
+        case .panespace(let cmd):
             ipcQueue.async {
-                if IPC.send(type: "run_command", payload: cmd) == nil { log("zspace isn't running (\(cmd))") }
+                if IPC.send(type: "run_command", payload: cmd) == nil { log("panespace isn't running (\(cmd))") }
             }
         case .shortcut(let name):
             run("/usr/bin/shortcuts", ["run", name])
@@ -209,7 +209,7 @@ final class Caps: NSObject, NSMenuDelegate {
         section("In \(name)", b.app)
         section("Everywhere", b.global)
         if b.app.isEmpty && b.global.isEmpty {
-            let i = NSMenuItem(title: "No bindings yet — Caps+key goes to zspace", action: nil, keyEquivalent: "")
+            let i = NSMenuItem(title: "No bindings yet — Caps+key goes to panespace", action: nil, keyEquivalent: "")
             i.isEnabled = false
             menu.addItem(i)
             menu.addItem(.separator())

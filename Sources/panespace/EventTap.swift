@@ -1,6 +1,6 @@
 import AppKit
 import MacKit
-import ZSpaceCore
+import PanespaceCore
 
 /// Global hotkeys + mouse tracking via a CGEventTap on its own thread, so a slow AX call on the
 /// main thread never delays typing. Needs only the Accessibility permission.
@@ -38,7 +38,7 @@ final class EventTap {
         }
     }
 
-    /// Event flags plus Caps Lock (when it is the zspace key and held).
+    /// Event flags plus Caps Lock (when it is the panespace key and held).
     private func modifiers(_ event: CGEvent) -> (Modifiers, capsHeld: Bool) {
         var mods = EventTap.modifiers(event.flags)
         // Caps (the companion app) swallows the Caps Lock key itself and tags what it passes on instead.
@@ -78,13 +78,13 @@ final class EventTap {
             CGEvent.tapEnable(tap: tap, enable: true)
             CFRunLoopRun()
         }
-        thread.name = "zspace.eventtap"
+        thread.name = "panespace.eventtap"
         thread.qualityOfService = .userInteractive
         thread.start()
         return true
     }
 
-    private let debug = ProcessInfo.processInfo.environment["ZSPACE_DEBUG"] != nil
+    private let debug = ProcessInfo.processInfo.environment["PANESPACE_DEBUG"] != nil
 
     private func handle(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
         if debug && type != .mouseMoved {

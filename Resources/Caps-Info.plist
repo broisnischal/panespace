@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>dev.zspace.Caps</string>
+    <string>app.panespace.Caps</string>
     <key>CFBundleName</key>
     <string>Caps</string>
     <key>CFBundleDisplayName</key>

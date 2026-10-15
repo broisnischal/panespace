@@ -3,8 +3,8 @@ import AppKit
 /// Read-only view of macOS Spaces through the window server's private (but long-stable) CGS calls,
 /// loaded with dlsym so a missing symbol just disables the checks.
 ///
-/// zspace replaces Spaces with its own workspaces: macOS hides windows on other Spaces from window
-/// managers, so a second desktop or an app in native full screen breaks tiling. This lets zspace notice.
+/// panespace replaces Spaces with its own workspaces: macOS hides windows on other Spaces from window
+/// managers, so a second desktop or an app in native full screen breaks tiling. This lets panespace notice.
 enum Spaces {
     private typealias MainConnection = @convention(c) () -> Int32
     private typealias CopyDisplaySpaces = @convention(c) (Int32) -> Unmanaged<CFArray>?

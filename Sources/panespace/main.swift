@@ -1,21 +1,21 @@
 import AppKit
 import MacKit
 import ApplicationServices
-import ZSpaceCore
+import PanespaceCore
 
-let zspaceVersion = "0.1.0"
+let panespaceVersion = "0.1.0"
 
 let help = """
-zspace \(zspaceVersion) — i3-style tiling window manager for macOS
+panespace \(panespaceVersion) — i3-style tiling window manager for macOS
 
 USAGE
-  zspace                      start the window manager (foreground)
-  zspace msg <command>        run an i3 command, e.g. zspace msg focus left
-  zspace msg -t <type>        query: get_tree, get_workspaces, get_bindings, get_binding_modes, get_config, get_version
-  zspace <command>            shorthand for `zspace msg <command>`
-  zspace list-windows         show every window and how zspace classifies it (for writing rules)
-  zspace check-config [path]  parse a config and print warnings
-  zspace init-config          write the default config if none exists, print its path
+  panespace                      start the window manager (foreground)
+  panespace msg <command>        run an i3 command, e.g. panespace msg focus left
+  panespace msg -t <type>        query: get_tree, get_workspaces, get_bindings, get_binding_modes, get_config, get_version
+  panespace <command>            shorthand for `panespace msg <command>`
+  panespace list-windows         show every window and how panespace classifies it (for writing rules)
+  panespace check-config [path]  parse a config and print warnings
+  panespace init-config          write the default config if none exists, print its path
 
 Config: \(configURL().path)
 """
@@ -24,12 +24,12 @@ func configURL() -> URL {
     let env = ProcessInfo.processInfo.environment
     let base = env["XDG_CONFIG_HOME"].map { URL(fileURLWithPath: $0) }
         ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config")
-    return base.appendingPathComponent("zspace/config")
+    return base.appendingPathComponent("panespace/config")
 }
 
 func send(_ type: String, _ payload: String) -> Never {
     guard let resp = IPC.send(type: type, payload: payload) else {
-        fputs("zspace: not running (no socket at \(IPC.socketPath))\n", stderr)
+        fputs("panespace: not running (no socket at \(IPC.socketPath))\n", stderr)
         exit(1)
     }
     print(resp)
@@ -46,7 +46,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if AXIsProcessTrustedWithOptions(prompt) { return start() }
         log("waiting for Accessibility permission (System Settings → Privacy & Security → Accessibility)")
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.title = "zspace ⚠︎"
+        item.button?.title = "panespace ⚠︎"
         let menu = NSMenu()
         menu.addItem(withTitle: "Grant Accessibility access…", action: #selector(openSettings), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -77,7 +77,7 @@ var signalSources: [DispatchSourceSignal] = []
 
 func runDaemon() -> Never {
     if IPC.send(type: "get_version", payload: "") != nil {
-        fputs("zspace: already running\n", stderr)
+        fputs("panespace: already running\n", stderr)
         exit(0)  // not a failure: launchd's KeepAlive must not keep relaunching a duplicate
     }
     let app = NSApplication.shared
@@ -100,7 +100,7 @@ func runDaemon() -> Never {
 
 func listWindows() -> Never {
     guard AXIsProcessTrusted() else {
-        fputs("zspace: this terminal needs Accessibility permission to read windows\n", stderr)
+        fputs("panespace: this terminal needs Accessibility permission to read windows\n", stderr)
         exit(1)
     }
     let server = windowServerSnapshot()
@@ -141,7 +141,7 @@ case "list-windows": listWindows()
 case "check-config":
     let url = args.count > 1 ? URL(fileURLWithPath: args[1]) : configURL()
     guard let text = try? String(contentsOf: url, encoding: .utf8) else {
-        fputs("zspace: cannot read \(url.path)\n", stderr)
+        fputs("panespace: cannot read \(url.path)\n", stderr)
         exit(1)
     }
     let c = Config.parse(text)
@@ -157,6 +157,6 @@ case "init-config":
     }
     print(url.path)
 case "help", "-h", "--help": print(help)
-case "version", "-v", "--version": print(zspaceVersion)
+case "version", "-v", "--version": print(panespaceVersion)
 default: send("run_command", args.joined(separator: " "))
 }

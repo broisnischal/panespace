@@ -3,13 +3,13 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>dev.zspace.ZSpace</string>
+    <string>app.panespace.Panespace</string>
     <key>CFBundleName</key>
-    <string>ZSpace</string>
+    <string>Panespace</string>
     <key>CFBundleDisplayName</key>
-    <string>ZSpace</string>
+    <string>Panespace</string>
     <key>CFBundleExecutable</key>
-    <string>zspace</string>
+    <string>panespace</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -19,7 +19,7 @@
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>NSAppleEventsUsageDescription</key>
-    <string>zspace auto-hides the menu bar and Dock in immersive mode.</string>
+    <string>panespace auto-hides the menu bar and Dock in immersive mode.</string>
     <key>LSUIElement</key>
     <true/>
     <key>NSHighResolutionCapable</key>

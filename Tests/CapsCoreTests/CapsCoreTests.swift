@@ -1,5 +1,5 @@
 import XCTest
-import ZSpaceCore
+import PanespaceCore
 @testable import CapsCore
 
 final class CapsConfigTests: XCTestCase {
@@ -30,7 +30,7 @@ final class CapsConfigTests: XCTestCase {
         XCTAssertEqual(c.action(for: k("t"), app: "Zen", bundleID: ""), .open("Ghostty"))
         XCTAssertEqual(c.action(for: k("comma"), app: "safari", bundleID: ""), .key(k("cmd+shift+bracketleft")))
         XCTAssertEqual(c.action(for: k("shift+j"), app: "Terminal", bundleID: "com.apple.Terminal"), .key(k("down")))
-        XCTAssertNil(c.action(for: k("j"), app: "Terminal", bundleID: "com.apple.Terminal"))  // → zspace
+        XCTAssertNil(c.action(for: k("j"), app: "Terminal", bundleID: "com.apple.Terminal"))  // → panespace
         XCTAssertNil(c.action(for: k("h"), app: "Zen", bundleID: ""))
         let b = c.bindings(app: "Zen", bundleID: "")
         XCTAssertEqual(b.app.count, 2)
@@ -42,7 +42,7 @@ final class CapsConfigTests: XCTestCase {
         XCTAssertEqual(try CapsConfig.action("text \"hi\\nthere\""), .text("hi\nthere"))
         XCTAssertEqual(try CapsConfig.action("open \"System Settings\""), .open("System Settings"))
         XCTAssertEqual(try CapsConfig.action("exec echo 'a b' | pbcopy"), .exec("echo 'a b' | pbcopy"))
-        XCTAssertEqual(try CapsConfig.action("zspace workspace 3"), .zspace("workspace 3"))
+        XCTAssertEqual(try CapsConfig.action("panespace workspace 3"), .panespace("workspace 3"))
         XCTAssertEqual(try CapsConfig.action("nothing"), .nothing)
         XCTAssertThrowsError(try CapsConfig.action("launch rockets"))
         XCTAssertThrowsError(try CapsConfig.action("key nope"))
@@ -60,11 +60,11 @@ final class CapsConfigTests: XCTestCase {
         XCTAssertEqual(CapsConfig.parse("bind m do teleport").warnings.count, 1)
     }
 
-    func testCheatSheetGroupsZspaceBindings() {
+    func testCheatSheetGroupsPanespaceBindings() {
         let z = Config.parse("set $mod caps\n" + DefaultConfig.text.replacingOccurrences(of: "set $mod ctrl+alt", with: ""))
-        let zspace = z.modes["default"]!.map { ($0.key, $0.value) }
+        let panespace = z.modes["default"]!.map { ($0.key, $0.value) }
         let caps = CapsConfig.parse("bind z open Zen\napp \"Zen\" {\n bind h key cmd+[\n}")
-        let s = CheatSheet.sections(config: caps, app: "Zen", bundleID: "", zspace: zspace)
+        let s = CheatSheet.sections(config: caps, app: "Zen", bundleID: "", panespace: panespace)
         XCTAssertEqual(s.map(\.title), ["In Zen", "Everywhere", "Windows", "Workspaces"])
         XCTAssertEqual(s[0].rows, [CheatRow(keys: "H", label: "Press ⌘[")])
         XCTAssertEqual(s[1].rows, [CheatRow(keys: "Z", label: "Open Zen")])

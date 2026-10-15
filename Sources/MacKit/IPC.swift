@@ -2,7 +2,7 @@ import Foundation
 
 /// Unix-socket IPC, i3-msg style. Request: "<type>\n<payload>"; response: JSON.
 public enum IPC {
-    public static var socketPath: String { "/tmp/zspace-\(getuid()).sock" }
+    public static var socketPath: String { "/tmp/panespace-\(getuid()).sock" }
 
     private static func withAddress<T>(_ path: String, _ body: (UnsafePointer<sockaddr>, socklen_t) -> T) -> T {
         var addr = sockaddr_un()
@@ -69,7 +69,7 @@ public enum IPC {
                 close(client)
             }
         }
-        thread.name = "zspace.ipc"
+        thread.name = "panespace.ipc"
         thread.start()
         return true
     }

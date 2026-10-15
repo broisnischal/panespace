@@ -18,7 +18,7 @@ enum Focus {
     private static let postRecord = sym(skylight, "SLPSPostEventRecordTo", PostRecord.self)
     private static let psnForPID = sym(UnsafeMutableRawPointer(bitPattern: -2), "GetProcessForPID", PSNForPID.self)
 
-    static let debug = ProcessInfo.processInfo.environment["ZSPACE_DEBUG"] != nil
+    static let debug = ProcessInfo.processInfo.environment["PANESPACE_DEBUG"] != nil
     static func lap(_ t: inout UInt64, _ s: String) {
         guard debug else { return }
         let n = DispatchTime.now().uptimeNanoseconds

@@ -1,15 +1,15 @@
 public enum DefaultConfig {
     public static let text = #"""
-# zspace config — i3 syntax. Lives at ~/.config/zspace/config
-# Reload with $mod+Shift+c (or `zspace msg reload`).
+# panespace config — i3 syntax. Lives at ~/.config/panespace/config
+# Reload with $mod+Shift+c (or `panespace msg reload`).
 #
 # Modifiers: alt (Mod1), cmd (Mod4/super), ctrl, shift, hyper (all four), meh (ctrl+alt+shift)
 # Criteria:  [app="regex"] [bundle_id="regex"] [title="regex"] [floating] [tiling]
 #            (i3's class/instance are accepted as aliases of app)
-# Find names for rules with: zspace list-windows
+# Find names for rules with: panespace list-windows
 
 # ctrl+alt (⌃⌥) is free in almost every Mac app. Plain alt would steal app shortcuts and the
-# special characters alt types (∑, †, …). Or make Caps Lock the zspace key, no other app needed:
+# special characters alt types (∑, †, …). Or make Caps Lock the panespace key, no other app needed:
 #   set $mod caps
 set $mod ctrl+alt
 
@@ -68,9 +68,9 @@ bindsym $mod+e layout toggle split
 bindsym $mod+s layout stacking
 bindsym $mod+w layout tabbed
 bindsym $mod+f fullscreen toggle
-# ⌃⌘F, Globe+F and the green button also use zspace fullscreen, so apps never leave your desktop
+# ⌃⌘F, Globe+F and the green button also use panespace fullscreen, so apps never leave your desktop
 # for a separate macOS Space (where they can't be tiled). "native_fullscreen macos" turns this off.
-native_fullscreen zspace
+native_fullscreen panespace
 # Immersive (Omarchy-style): auto-hide the macOS menu bar and Dock so tiles and fullscreen use the
 # whole display. Toggle with $mod+Shift+f, or start in it with: immersive yes
 bindsym $mod+Shift+f immersive toggle

@@ -2,13 +2,13 @@ import AppKit
 import MacKit
 import ApplicationServices
 import Carbon
-import ZSpaceCore
+import PanespaceCore
 
 private let logTime = ISO8601DateFormatter()
 
 /// Thread-safe (stderr writes are atomic per line).
 func log(_ s: String) {
-    FileHandle.standardError.write(Data("\(logTime.string(from: Date())) zspace: \(s)\n".utf8))
+    FileHandle.standardError.write(Data("\(logTime.string(from: Date())) panespace: \(s)\n".utf8))
 }
 
 enum Screens {
@@ -95,9 +95,9 @@ final class WindowManager {
     private let border = FocusBorder()
     let chrome = MacChrome()
 
-    private let axQueue = DispatchQueue(label: "zspace.ax", qos: .userInteractive)
-    private let syncQueue = DispatchQueue(label: "zspace.sync", qos: .userInitiated)
-    private let eventQueue = DispatchQueue(label: "zspace.events", qos: .userInteractive)
+    private let axQueue = DispatchQueue(label: "panespace.ax", qos: .userInteractive)
+    private let syncQueue = DispatchQueue(label: "panespace.sync", qos: .userInitiated)
+    private let eventQueue = DispatchQueue(label: "panespace.events", qos: .userInteractive)
     private let focusGeneration = Counter()
 
     private var trackers: [pid_t: AppTracker] = [:]
@@ -126,7 +126,7 @@ final class WindowManager {
     private var lastMouseMove = Date.distantPast
     private var secureInput = false
     private var timers: [Timer] = []
-    private let debug = ProcessInfo.processInfo.environment["ZSPACE_DEBUG"] != nil
+    private let debug = ProcessInfo.processInfo.environment["PANESPACE_DEBUG"] != nil
     /// AX and event-tap callbacks hold this pointer, so the manager is retained for the life of the process.
     private lazy var refcon: UnsafeMutableRawPointer = Unmanaged.passRetained(self).toOpaque()
 
@@ -141,7 +141,7 @@ final class WindowManager {
         var focused: String
         var windows: [Entry]
     }
-    private static let sessionPath = "/tmp/zspace-\(getuid())-session.json"
+    private static let sessionPath = "/tmp/panespace-\(getuid())-session.json"
     private var restoring: Session?
     private var lastSavedSession: Data?
 
@@ -365,7 +365,7 @@ final class WindowManager {
         case "get_bindings":
             return IPC.json((model.config.modes[model.mode] ?? [:]).map { ["key": $0.key.description, "command": $0.value] })
         case "get_config": return IPC.json(["path": configURL.path, "warnings": configWarnings])
-        case "get_version": return IPC.json(["version": zspaceVersion])
+        case "get_version": return IPC.json(["version": panespaceVersion])
         default: return IPC.json(["success": false, "error": "unknown message type '\(type)'"])
         }
     }
@@ -1016,11 +1016,11 @@ final class WindowManager {
         var parts: [String] = []
         if spaces.extraDesktops > 0 {
             parts.append("You have \(spaces.extraDesktops + 1) macOS desktops. Windows on the other desktops can't be tiled. "
-                         + "Close the extra ones in Mission Control: zspace workspaces (Caps+1…9) replace them.")
+                         + "Close the extra ones in Mission Control: panespace workspaces (Caps+1…9) replace them.")
         }
         if spaces.fullscreenApps > 0 {
             parts.append("\(spaces.fullscreenApps) app(s) are in macOS full screen, outside tiling. Exit it (⌃⌘F) — "
-                         + "zspace fullscreen (Caps+F) keeps them tiled.")
+                         + "panespace fullscreen (Caps+F) keeps them tiled.")
         }
         return parts.isEmpty ? nil : parts.joined(separator: "\n\n")
     }
@@ -1033,8 +1033,8 @@ final class WindowManager {
                 updateStatus()
             }
         }
-        // An app went into macOS full screen (green button, menu, or before zspace started): bring it back to
-        // the desktop and use zspace fullscreen instead, so it stays tiled and navigable.
+        // An app went into macOS full screen (green button, menu, or before panespace started): bring it back to
+        // the desktop and use panespace fullscreen instead, so it stays tiled and navigable.
         if model.config.interceptNativeFullscreen {
             for fs in s.fullscreenWindows where !pullingBack.contains(fs.window) { pullBack(fs) }
         }
@@ -1045,7 +1045,7 @@ final class WindowManager {
     }
 
     private var pullingBack = Set<CGWindowID>()
-    /// Windows that left macOS full screen and get zspace fullscreen as soon as they're back in the layout.
+    /// Windows that left macOS full screen and get panespace fullscreen as soon as they're back in the layout.
     private var fullscreenOnReturn = Set<CGWindowID>()
 
     private func pullBack(_ fs: Spaces.FullscreenWindow) {
@@ -1082,7 +1082,7 @@ final class WindowManager {
     func showDesktopsAlert() {
         guard let text = spacesWarning, alertPanel == nil else { return }
         alertPanel = AlertPanel(
-            title: "zspace works best with one desktop",
+            title: "panespace works best with one desktop",
             text: text + "\n\nIn Mission Control, hover the row at the top and click × on the extra desktops. "
                 + "Their windows move to the desktop you keep.",
             buttons: [
@@ -1107,7 +1107,7 @@ func hidePoint(_ id: MonitorID, monitors: [Monitor], width: () -> CGFloat) -> CG
     return right <= left ? CGPoint(x: v.maxX - 1, y: v.maxY - 1) : CGPoint(x: v.minX + 1 - width(), y: v.maxY - 1)
 }
 
-/// An NSAlert shown as a floating window instead of modally, so zspace keeps responding while it's up.
+/// An NSAlert shown as a floating window instead of modally, so panespace keeps responding while it's up.
 final class AlertPanel: NSObject {
     private let alert = NSAlert()
     private var actions: [() -> Void] = []

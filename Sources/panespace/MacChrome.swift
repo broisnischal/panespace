@@ -2,7 +2,7 @@ import Foundation
 
 /// Immersive mode (Omarchy-style): the macOS menu bar and Dock auto-hide, so tiles and fullscreen
 /// windows use the whole display. Changes the real macOS settings through System Events (asks for
-/// Automation permission once) and puts back what it found when zspace quits.
+/// Automation permission once) and puts back what it found when panespace quits.
 final class MacChrome {
     private(set) var isImmersive: Bool
     private var original: (menuBar: Bool, dock: Bool)?
@@ -30,7 +30,7 @@ final class MacChrome {
         write(menuBar: target.0, dock: target.1, wait: false)
     }
 
-    /// Called on quit: leave the user's Mac as zspace found it.
+    /// Called on quit: leave the user's Mac as panespace found it.
     func restore() {
         guard let o = original else { return }
         write(menuBar: o.menuBar, dock: o.dock, wait: true)
@@ -54,7 +54,7 @@ final class MacChrome {
             guard proc.terminationStatus != 0 else { return }
             let msg = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
             log("immersive: System Events refused (\(msg.trimmingCharacters(in: .whitespacesAndNewlines))). "
-                + "Allow ZSpace under System Settings → Privacy & Security → Automation.")
+                + "Allow Panespace under System Settings → Privacy & Security → Automation.")
         }
         do {
             try p.run()

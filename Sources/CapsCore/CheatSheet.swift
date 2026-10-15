@@ -1,5 +1,5 @@
 import Foundation
-import ZSpaceCore
+import PanespaceCore
 
 public struct CheatRow: Equatable {
     public let keys: String
@@ -16,33 +16,33 @@ public struct CheatSection: Equatable {
 }
 
 /// What the hold-Caps sheet shows: Caps's bindings for the frontmost app, then everywhere, then the
-/// zspace bindings Caps passes through — with friendly labels and repetitive keys collapsed
+/// panespace bindings Caps passes through — with friendly labels and repetitive keys collapsed
 /// (1…0 → one row, H and ← → one row).
 public enum CheatSheet {
     public static func sections(config: CapsConfig, app: String, bundleID: String,
-                                zspace: [(KeyCombo, String)]) -> [CheatSection] {
+                                panespace: [(KeyCombo, String)]) -> [CheatSection] {
         let caps = config.bindings(app: app, bundleID: bundleID)
         var out: [CheatSection] = []
         func add(_ title: String, _ rows: [CheatRow]) { if !rows.isEmpty { out.append(CheatSection(title: title, rows: rows)) } }
         add("In \(app)", caps.app.map { CheatRow(keys: keys($0.combo), label: $0.note ?? label($0.action)) })
         add("Everywhere", caps.global.map { CheatRow(keys: keys($0.combo), label: $0.note ?? label($0.action)) })
 
-        // zspace sees Caps+key only for keys Caps doesn't take in this app.
+        // panespace sees Caps+key only for keys Caps doesn't take in this app.
         let taken = Set(caps.app.map(\.combo) + caps.global.map(\.combo))
         var wm: [(KeyCombo, String)] = []
-        for (combo, cmd) in zspace where combo.modifiers.contains(.caps) {
+        for (combo, cmd) in panespace where combo.modifiers.contains(.caps) {
             var k = combo
             k.modifiers.remove(.caps)
             if !taken.contains(k) { wm.append((k, cmd)) }
         }
         let isWorkspace = { (c: String) in c.hasPrefix("workspace") || c.hasPrefix("move container to workspace") || c.hasPrefix("move workspace") }
-        add("Windows", zspaceRows(wm.filter { !isWorkspace($0.1) }))
-        add("Workspaces", zspaceRows(wm.filter { isWorkspace($0.1) }))
+        add("Windows", panespaceRows(wm.filter { !isWorkspace($0.1) }))
+        add("Workspaces", panespaceRows(wm.filter { isWorkspace($0.1) }))
         return out
     }
 
-    /// Groups zspace bindings: numbered workspaces into one row each, duplicate commands into "H  ←".
-    static func zspaceRows(_ bindings: [(KeyCombo, String)]) -> [CheatRow] {
+    /// Groups panespace bindings: numbered workspaces into one row each, duplicate commands into "H  ←".
+    static func panespaceRows(_ bindings: [(KeyCombo, String)]) -> [CheatRow] {
         var rows: [(order: Int, row: CheatRow)] = []
         var byCommand: [String: [KeyCombo]] = [:]
         var numbered: [String: [(Int, KeyCombo)]] = [:]  // command template → (n, key)
@@ -63,7 +63,7 @@ public enum CheatSheet {
         }
         for (cmd, combos) in byCommand {
             let ks = combos.sorted { (isArrow($0) ? 1 : 0, $0.description) < (isArrow($1) ? 1 : 0, $1.description) }
-            rows.append((order(cmd), CheatRow(keys: ks.map(keys).joined(separator: " "), label: zspaceLabel(cmd))))
+            rows.append((order(cmd), CheatRow(keys: ks.map(keys).joined(separator: " "), label: panespaceLabel(cmd))))
         }
         return rows.sorted { ($0.order, $0.row.label) < ($1.order, $1.row.label) }.map(\.row)
     }
@@ -95,14 +95,14 @@ public enum CheatSheet {
             return "Run " + (first as NSString).lastPathComponent
         case .url(let u): return URL(string: u)?.host ?? u
         case .text(let t): return "Type “" + (t.count > 18 ? t.prefix(17) + "…" : t) + "”"
-        case .zspace(let c): return zspaceLabel(c)
+        case .panespace(let c): return panespaceLabel(c)
         case .shortcut(let n): return "Shortcut “\(n)”"
         case .special(let s): return s.label
         case .nothing: return "Nothing"
         }
     }
 
-    public static func zspaceLabel(_ c: String) -> String {
+    public static func panespaceLabel(_ c: String) -> String {
         let arrows = ["left": "←", "right": "→", "up": "↑", "down": "↓"]
         let w = CommandParser.words(c).map { $0.lowercased() }
         func arg(_ i: Int) -> String { i < w.count ? w[i] : "" }
@@ -129,8 +129,8 @@ public enum CheatSheet {
         case "balance": return "Equal sizes"
         case "scratchpad": return "Show scratchpad"
         case "kill": return "Close window"
-        case "reload": return "Reload zspace"
-        case "exit": return "Quit zspace"
+        case "reload": return "Reload panespace"
+        case "exit": return "Quit panespace"
         case "workspace":
             return ["back_and_forth": "Last workspace", "next": "Next workspace", "prev": "Previous workspace",
                     "next_on_output": "Next workspace", "prev_on_output": "Previous workspace"][arg(1)] ?? "Workspace \(arg(1))"
