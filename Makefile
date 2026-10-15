@@ -6,8 +6,9 @@ SIGN_ID   ?= $(shell security find-identity -v -p codesigning 2>/dev/null | awk 
 ifeq ($(SIGN_ID),)
 SIGN_ID   := -
 endif
+VERSION   := $(shell /usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' Resources/Info.plist)
 
-.PHONY: build test icon app install uninstall login-item caps-login-item no-login-item clean
+.PHONY: build test icon app dist install uninstall login-item caps-login-item no-login-item clean
 
 build:
 	swift build -c release
@@ -57,6 +58,13 @@ app: build
 	$(call bundle,Caps,caps,Caps-Info.plist)
 	@echo "built Panespace.app and Caps.app (signed: $(SIGN_ID))"
 
+# Zipped bundles for a GitHub release: dist/Panespace-$(VERSION).zip, dist/Caps-$(VERSION).zip.
+dist: app
+	rm -rf dist && mkdir dist
+	ditto -c -k --keepParent Panespace.app dist/Panespace-$(VERSION).zip
+	ditto -c -k --keepParent Caps.app dist/Caps-$(VERSION).zip
+	@echo "release zips in dist/ (v$(VERSION))"
+
 install: app
 	mkdir -p $(APPS_DIR) $(BIN_DIR)
 	rm -rf $(APPS_DIR)/Panespace.app $(APPS_DIR)/Caps.app
@@ -83,4 +91,4 @@ uninstall: no-login-item
 	rm -rf $(APPS_DIR)/Panespace.app $(APPS_DIR)/Caps.app $(BIN_DIR)/panespace $(BIN_DIR)/caps
 
 clean:
-	rm -rf .build Panespace.app Caps.app
+	rm -rf .build dist Panespace.app Caps.app

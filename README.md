@@ -15,6 +15,10 @@ An i3-style tiling window manager for macOS. It reads i3's config syntax, so an 
 
 ## Install
 
+**Download.** Get `Panespace-<version>.zip` from [Releases](https://github.com/broisnischal/panespace/releases), unzip it into `~/Applications` and open it. The app is signed but not notarized, so on first launch right-click it and choose **Open**, or run `xattr -dr com.apple.quarantine ~/Applications/Panespace.app`.
+
+**From source:**
+
 ```sh
 make install          # builds, signs, installs Panespace.app and Caps.app (+ panespace, caps CLIs in ~/.local/bin)
 open ~/Applications/Panespace.app ~/Applications/Caps.app
