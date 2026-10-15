@@ -1,3 +1,5 @@
+<p align="center"><img src="Resources/AppIcon.png" width="128" alt="Panespace icon"></p>
+
 # Panespace
 
 An i3-style tiling window manager for macOS. It reads i3's config syntax, so an existing i3 config mostly just works. It needs no SIP changes, no window-server patching and no Dock injection; it runs on the Accessibility permission alone.

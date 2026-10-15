@@ -7,7 +7,7 @@ ifeq ($(SIGN_ID),)
 SIGN_ID   := -
 endif
 
-.PHONY: build test app install uninstall login-item caps-login-item no-login-item clean
+.PHONY: build test icon app install uninstall login-item caps-login-item no-login-item clean
 
 build:
 	swift build -c release
@@ -15,12 +15,24 @@ build:
 test:
 	swift test
 
-# $(call bundle,Name,executable,plist): build Name.app around .build/release/executable and sign it.
+# Regenerate Resources/AppIcon.icns (and the README's AppIcon.png) from scripts/make-icon.swift.
+icon:
+	rm -rf .build/AppIcon.iconset && mkdir -p .build/AppIcon.iconset
+	swift scripts/make-icon.swift .build/AppIcon.png
+	for s in 16 32 128 256 512; do \
+	  sips -z $$s $$s .build/AppIcon.png --out .build/AppIcon.iconset/icon_$${s}x$${s}.png >/dev/null; \
+	  sips -z $$((s*2)) $$((s*2)) .build/AppIcon.png --out .build/AppIcon.iconset/icon_$${s}x$${s}@2x.png >/dev/null; \
+	done
+	iconutil -c icns .build/AppIcon.iconset -o Resources/AppIcon.icns
+	sips -z 256 256 .build/AppIcon.png --out Resources/AppIcon.png >/dev/null
+
+# $(call bundle,Name,executable,plist[,icon]): build Name.app around .build/release/executable and sign it.
 define bundle
 	rm -rf $(1).app
-	mkdir -p $(1).app/Contents/MacOS
+	mkdir -p $(1).app/Contents/MacOS $(1).app/Contents/Resources
 	cp .build/release/$(2) $(1).app/Contents/MacOS/$(2)
 	cp Resources/$(3) $(1).app/Contents/Info.plist
+	$(if $(4),cp Resources/$(4) $(1).app/Contents/Resources/)
 	codesign --force --sign "$(SIGN_ID)" --identifier app.panespace.$(1) $(1).app
 endef
 
@@ -41,7 +53,7 @@ define agent
 endef
 
 app: build
-	$(call bundle,Panespace,panespace,Info.plist)
+	$(call bundle,Panespace,panespace,Info.plist,AppIcon.icns)
 	$(call bundle,Caps,caps,Caps-Info.plist)
 	@echo "built Panespace.app and Caps.app (signed: $(SIGN_ID))"
 

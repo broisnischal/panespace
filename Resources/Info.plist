@@ -8,6 +8,8 @@
     <string>Panespace</string>
     <key>CFBundleDisplayName</key>
     <string>Panespace</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleExecutable</key>
     <string>panespace</string>
     <key>CFBundlePackageType</key>
