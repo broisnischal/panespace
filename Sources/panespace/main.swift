@@ -46,7 +46,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if AXIsProcessTrustedWithOptions(prompt) { return start() }
         log("waiting for Accessibility permission (System Settings → Privacy & Security → Accessibility)")
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.title = "panespace ⚠︎"
+        item.button?.title = "Panespace ⚠︎"
         let menu = NSMenu()
         menu.addItem(withTitle: "Grant Accessibility access…", action: #selector(openSettings), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")

@@ -519,6 +519,32 @@ final class ParserTests: XCTestCase {
         XCTAssertFalse(Config.parse("bindsym alt+h focus left").usesCapsLock)
     }
 
+    func testEditSettings() {
+        let text = """
+        # header
+        set $mod alt     # the key
+        focus_follows_mouse no
+        mode "resize" {
+            focus_follows_mouse yes
+        }
+        """
+        XCTAssertEqual(Config.value(of: "set $mod", in: text), "alt")
+        XCTAssertEqual(Config.value(of: "focus_follows_mouse", in: text), "no")
+        XCTAssertNil(Config.value(of: "workspace_indicator", in: text))
+
+        let mod = Config.setting("set $mod", to: "ctrl+alt", in: text)
+        XCTAssertTrue(mod.contains("\nset $mod ctrl+alt # the key\n"))
+        XCTAssertEqual(Config.value(of: "set $mod", in: mod), "ctrl+alt")
+
+        let ffm = Config.setting("focus_follows_mouse", to: "yes", in: text)
+        XCTAssertTrue(ffm.contains("\nfocus_follows_mouse yes\nmode"))
+        XCTAssertTrue(ffm.contains("    focus_follows_mouse yes\n"))  // inside the mode block: untouched
+
+        let added = Config.setting("workspace_indicator", to: "dots", in: text)
+        XCTAssertTrue(added.hasPrefix("# header\nworkspace_indicator dots\nset $mod alt"))
+        XCTAssertEqual(Config.parse(added).workspaceIndicator, "dots")
+    }
+
     func testKeyCombos() {
         XCTAssertEqual(KeyCombo.parse("hyper+Return"), KeyCombo(keyCode: 0x24, modifiers: [.shift, .control, .option, .command]))
         XCTAssertEqual(KeyCombo.parse("ctrl+F12")?.keyCode, 0x6F)

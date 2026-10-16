@@ -80,6 +80,50 @@ public struct Config {
         return line
     }
 
+    /// Index of the first top-level line whose leading words are `key` (e.g. "focus_follows_mouse" or
+    /// "set $mod"); lines inside `mode { … }` blocks and comments don't count.
+    private static func settingLine(_ key: String, in lines: [String]) -> Int? {
+        let keyWords = key.split(separator: " ").map(String.init)
+        var depth = 0
+        for (i, raw) in lines.enumerated() {
+            let line = stripTrailingComment(raw).trimmingCharacters(in: .whitespaces)
+            if line.isEmpty || line.hasPrefix("#") { continue }
+            if line == "}" { depth = max(0, depth - 1); continue }
+            let words = CommandParser.words(line)
+            if depth == 0, words.count > keyWords.count,
+               zip(words, keyWords).allSatisfy({ $0.lowercased() == $1.lowercased() }) { return i }
+            if line.hasSuffix("{") { depth += 1 }
+        }
+        return nil
+    }
+
+    /// The value of a top-level setting in config `text`, e.g. `value(of: "set $mod", in:)` → "alt".
+    public static func value(of key: String, in text: String) -> String? {
+        let lines = text.components(separatedBy: "\n")
+        guard let i = settingLine(key, in: lines) else { return nil }
+        let words = CommandParser.words(stripTrailingComment(lines[i]))
+        return words.dropFirst(key.split(separator: " ").count).joined(separator: " ")
+    }
+
+    /// `text` with the setting changed to `value` in place (its trailing comment kept), or added before the
+    /// first setting when the config doesn't have it. Used by the menu bar's Settings items.
+    public static func setting(_ key: String, to value: String, in text: String) -> String {
+        var lines = text.components(separatedBy: "\n")
+        let body = "\(key) \(value)"
+        if let i = settingLine(key, in: lines) {
+            let code = stripTrailingComment(lines[i])
+            let comment = lines[i].dropFirst(code.count)
+            lines[i] = comment.isEmpty ? body : body.padding(toLength: max(code.count, body.count + 1), withPad: " ", startingAt: 0) + comment
+        } else {
+            let first = lines.firstIndex {
+                let t = $0.trimmingCharacters(in: .whitespaces)
+                return !t.isEmpty && !t.hasPrefix("#")
+            } ?? lines.count
+            lines.insert(body, at: first)
+        }
+        return lines.joined(separator: "\n")
+    }
+
     public static func parse(_ text: String) -> Config {
         var c = Config()
         var vars: [(String, String)] = []

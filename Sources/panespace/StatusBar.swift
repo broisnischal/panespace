@@ -1,5 +1,6 @@
 import AppKit
 import CoreText
+import UniformTypeIdentifiers
 import PanespaceCore
 
 /// Menu bar indicator. Drawn as a template image so macOS tints it exactly like its own icons
@@ -33,10 +34,10 @@ final class StatusBar: NSObject, NSMenuDelegate {
         renderedKey = key
         button.image = WorkspaceIcon.render(slots: slots, mode: mode, secureInput: secureInput, warning: warn, look: look)
         let focused = model.focusedWorkspace.name
-        button.setAccessibilityLabel("panespace, workspace \(focused)" + (mode.map { ", \($0) mode" } ?? ""))
+        button.setAccessibilityLabel("Panespace, workspace \(focused)" + (mode.map { ", \($0) mode" } ?? ""))
         button.toolTip = spacesWarning
-            ?? (secureInput ? "Secure Input is on (a password field is focused), so macOS is withholding keystrokes from panespace."
-                            : "panespace — workspace \(focused)")
+            ?? (secureInput ? "Secure Input is on (a password field is focused), so macOS is withholding keystrokes from Panespace."
+                            : "Panespace — workspace \(focused)")
     }
 
     // MARK: Menu
@@ -46,43 +47,162 @@ final class StatusBar: NSObject, NSMenuDelegate {
         guard let manager else { return }
         let model = manager.model
         if let warning = manager.spacesWarning {
-            let i = menuItem("⚠︎ Some windows can't be tiled — how to fix…", #selector(showSpacesHelp))
+            let i = menuItem("Some Windows Can't Be Tiled…", #selector(showSpacesHelp), symbol: "exclamationmark.triangle")
             i.toolTip = warning
             menu.addItem(i)
-            menu.addItem(.separator())
         }
+        if !manager.configWarnings.isEmpty {
+            let n = manager.configWarnings.count
+            menu.addItem(menuItem("\(n) Config Warning\(n == 1 ? "" : "s")…", #selector(showWarnings),
+                                  symbol: "exclamationmark.triangle"))
+        }
+        if menu.numberOfItems > 0 { menu.addItem(.separator()) }
+
         menu.addItem(header("Workspaces"))
         for ws in model.sortedWorkspaces where !ws.isEmpty || model.isVisible(ws) {
-            var apps: [String] = []
-            for w in ws.allWindows where !apps.contains(w.info.app) { apps.append(w.info.app) }
-            let item = NSMenuItem(title: ws.name, action: #selector(switchWorkspace(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = ws.name
-            item.state = ws === model.focusedWorkspace ? .on : .off
-            let title = NSMutableAttributedString(string: ws.name, attributes: [.font: NSFont.menuFont(ofSize: 0)])
-            var detail = apps.isEmpty ? "empty" : apps.joined(separator: ", ")
-            if model.monitors.count > 1, let m = model.monitor(ws.monitorID) { detail += "  ·  \(m.name)" }
-            title.append(NSAttributedString(string: "    " + detail, attributes: [
-                .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
-                .foregroundColor: NSColor.secondaryLabelColor,
-            ]))
-            item.attributedTitle = title
-            menu.addItem(item)
+            menu.addItem(workspaceItem(ws, model))
+        }
+
+        // The focused window's actions. Only number keys are bound by default, so this is how to reach them.
+        if let w = model.focusedWindow, let ws = w.workspace {
+            menu.addItem(.separator())
+            menu.addItem(header("Window"))
+            menu.addItem(commandItem(w.isFloating ? "Tile Window" : "Float Window", "floating toggle",
+                                     symbol: w.isFloating ? "rectangle.split.2x1" : "macwindow.on.rectangle"))
+            let fs = commandItem("Fullscreen", "fullscreen toggle", symbol: "arrow.up.left.and.arrow.down.right")
+            fs.state = ws.fullscreen === w ? .on : .off
+            menu.addItem(fs)
+            if !w.isFloating, let parent = w.parent {
+                menu.addItem(layoutItem(current: parent.layout))
+                if ws.root.windows.count > 1 {
+                    menu.addItem(commandItem("Balance Sizes", "balance", symbol: "equal.square"))
+                }
+            }
         }
         menu.addItem(.separator())
 
-        let immersive = menuItem("Immersive Mode", #selector(toggleImmersive), shortcut: "immersive toggle")
+        let immersive = menuItem("Immersive Mode", #selector(toggleImmersive), shortcut: "immersive toggle",
+                                 symbol: "rectangle.inset.filled")
         immersive.state = manager.chrome.isImmersive ? .on : .off
         immersive.toolTip = "Auto-hide the menu bar and Dock so windows use the whole screen"
         menu.addItem(immersive)
+        menu.addItem(settingsItem(manager))
         menu.addItem(.separator())
-        menu.addItem(menuItem("Reload Config", #selector(reload), shortcut: "reload"))
-        menu.addItem(menuItem("Edit Config…", #selector(editConfig)))
-        if !manager.configWarnings.isEmpty {
-            menu.addItem(menuItem("Config Warnings (\(manager.configWarnings.count))…", #selector(showWarnings)))
+        menu.addItem(menuItem("About Panespace", #selector(about), symbol: "info.circle"))
+        menu.addItem(menuItem("Quit Panespace", #selector(quit), shortcut: "exit", symbol: "power"))
+    }
+
+    /// `[1] Deck, Ghostty  ⌥1`: the workspace's badge, its apps, and the key that switches to it.
+    private func workspaceItem(_ ws: Workspace, _ model: Model) -> NSMenuItem {
+        var apps: [String] = []
+        for w in ws.allWindows where !apps.contains(w.info.app) { apps.append(w.info.app) }
+        let focused = ws === model.focusedWorkspace
+        let item = menuItem(ws.name, #selector(switchWorkspace(_:)),
+                            shortcut: ["workspace number \(ws.name)", "workspace \(ws.name)", "workspace \"\(ws.name)\""])
+        item.representedObject = ws.name
+        item.state = focused ? .on : .off
+        item.image = WorkspaceIcon.menuBadge(ws.name, filled: focused)
+
+        let font = NSFont.menuFont(ofSize: 0)
+        let primary: [NSAttributedString.Key: Any] = [.font: font]
+        let secondary: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.secondaryLabelColor]
+        let title = NSMutableAttributedString()
+        if ws.number == nil { title.append(NSAttributedString(string: ws.name + "  ", attributes: primary)) }
+        if apps.isEmpty {
+            title.append(NSAttributedString(string: "Empty", attributes: secondary))
+        } else {
+            let shown = apps.prefix(3).joined(separator: ", ")
+            title.append(NSAttributedString(string: shown, attributes: ws.number == nil ? secondary : primary))
+            if apps.count > 3 { title.append(NSAttributedString(string: " +\(apps.count - 3)", attributes: secondary)) }
         }
-        menu.addItem(.separator())
-        menu.addItem(menuItem("Quit panespace", #selector(quit), shortcut: "exit"))
+        if model.monitors.count > 1, let m = model.monitor(ws.monitorID) {
+            title.append(NSAttributedString(string: "  ·  \(m.name)", attributes: secondary))
+        }
+        item.attributedTitle = title
+        item.toolTip = apps.isEmpty ? nil : apps.joined(separator: ", ")
+        return item
+    }
+
+    private static let layouts: [(layout: Layout, label: String, symbol: String)] = [
+        (.splitH, "Side by Side", "rectangle.split.2x1"), (.splitV, "Top and Bottom", "rectangle.split.1x2"),
+        (.tabbed, "Tabbed", "squares.below.rectangle"), (.stacking, "Stacked", "rectangle.stack"),
+    ]
+
+    private func layoutItem(current: Layout) -> NSMenuItem {
+        let sub = NSMenu()
+        sub.autoenablesItems = false
+        for l in StatusBar.layouts {
+            let i = commandItem(l.label, "layout \(l.layout.rawValue)", symbol: l.symbol)
+            i.state = l.layout == current ? .on : .off
+            sub.addItem(i)
+        }
+        let item = NSMenuItem(title: "Layout", action: nil, keyEquivalent: "")
+        item.image = symbol(StatusBar.layouts.first { $0.layout == current }?.symbol ?? "rectangle.split.2x1")
+        item.submenu = sub
+        return item
+    }
+
+    private func settingsItem(_ manager: WindowManager) -> NSMenuItem {
+        let model = manager.model
+        let sub = NSMenu()
+        sub.autoenablesItems = false
+        let ffm = menuItem("Focus Follows Mouse", #selector(toggleFocusFollowsMouse))
+        ffm.state = model.config.focusFollowsMouse ? .on : .off
+        sub.addItem(ffm)
+        let login = menuItem("Open at Login", #selector(toggleLogin))
+        login.state = LoginItem.isEnabled ? .on : .off
+        sub.addItem(login)
+        sub.addItem(.separator())
+        sub.addItem(choices("Modifier Key", key: "set $mod", current: configValue("set $mod"), StatusBar.modifiers))
+        sub.addItem(choices("Menu Bar Indicator", key: "workspace_indicator", current: model.config.workspaceIndicator,
+                            StatusBar.indicators))
+        sub.addItem(.separator())
+        sub.addItem(menuItem("Edit Config…", #selector(editConfig)))
+        sub.addItem(menuItem("Reload Config", #selector(reload), shortcut: "reload"))
+        let item = NSMenuItem(title: "Settings", action: nil, keyEquivalent: "")
+        item.image = symbol("gearshape")
+        item.submenu = sub
+        return item
+    }
+
+    private static let modifiers: [(value: String, label: String)] = [
+        ("alt", "Option ⌥"), ("ctrl+alt", "Control + Option ⌃⌥"), ("cmd", "Command ⌘"),
+        ("caps", "Caps Lock ⇪"), ("hyper", "Hyper ⌃⌥⇧⌘"),
+    ]
+    private static let indicators: [(value: String, label: String)] = [
+        ("number", "Current Number"), ("segmented", "Segmented"), ("dots", "Dots"), ("tiles", "Tiles"),
+    ]
+
+    /// A submenu of values for one config setting; picking one writes it to the config and reloads.
+    private func choices(_ title: String, key: String, current: String?, _ options: [(value: String, label: String)]) -> NSMenuItem {
+        let sub = NSMenu()
+        sub.autoenablesItems = false
+        for o in options {
+            let i = NSMenuItem(title: o.label, action: #selector(pickSetting(_:)), keyEquivalent: "")
+            i.target = self
+            i.representedObject = [key, o.value]
+            i.state = o.value == current?.lowercased() ? .on : .off
+            sub.addItem(i)
+        }
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.submenu = sub
+        return item
+    }
+
+    private func symbol(_ name: String) -> NSImage? {
+        NSImage(systemSymbolName: name, accessibilityDescription: nil)
+    }
+
+    /// Runs a Panespace command, showing the user's binding for it (if any) as the shortcut.
+    private func commandItem(_ title: String, _ command: String, symbol name: String) -> NSMenuItem {
+        let i = menuItem(title, #selector(runCommand(_:)), shortcut: command, symbol: name)
+        i.representedObject = command
+        return i
+    }
+
+    private func configValue(_ key: String) -> String? {
+        guard let url = manager?.configURL, let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        return Config.value(of: key, in: text)
     }
 
     private func header(_ title: String) -> NSMenuItem {
@@ -92,11 +212,16 @@ final class StatusBar: NSObject, NSMenuDelegate {
         return i
     }
 
-    /// Shows the user's actual binding for `command` (from the config) as the item's shortcut hint.
-    private func menuItem(_ title: String, _ action: Selector, shortcut command: String? = nil) -> NSMenuItem {
+    private func menuItem(_ title: String, _ action: Selector, shortcut command: String? = nil, symbol name: String? = nil) -> NSMenuItem {
+        menuItem(title, action, shortcut: command.map { [$0] } ?? [], symbol: name)
+    }
+
+    /// Shows the user's actual binding for any of `commands` (from the config) as the item's shortcut hint.
+    private func menuItem(_ title: String, _ action: Selector, shortcut commands: [String], symbol name: String? = nil) -> NSMenuItem {
         let i = NSMenuItem(title: title, action: action, keyEquivalent: "")
         i.target = self
-        if let command, let combo = manager?.model.config.modes["default"]?.first(where: { $0.value == command })?.key,
+        if let name { i.image = symbol(name) }
+        if let combo = manager?.model.config.modes["default"]?.first(where: { commands.contains($0.value) })?.key,
            let name = combo.keyName, name.count == 1, !combo.modifiers.contains(.caps) {
             i.keyEquivalent = name
             var m: NSEvent.ModifierFlags = []
@@ -114,26 +239,92 @@ final class StatusBar: NSObject, NSMenuDelegate {
         manager?.runCommand("workspace \"\(name.replacingOccurrences(of: "\"", with: "\\\""))\"")
     }
 
+    @objc private func runCommand(_ sender: NSMenuItem) {
+        guard let command = sender.representedObject as? String else { return }
+        manager?.runCommand(command)
+    }
+
     @objc private func showSpacesHelp() { manager?.showDesktopsAlert() }
 
     @objc private func toggleImmersive() { manager?.runCommand("immersive toggle") }
     @objc private func reload() { manager?.reload() }
 
+    /// Code editors, in order of preference. TextEdit is the last resort: its smart quotes turn `"` into `”`,
+    /// which breaks lines like `mode "resize"`.
+    private static let editors = [
+        "dev.zed.Zed", "com.todesktop.230313mzl4w4u92" /* Cursor */, "com.microsoft.VSCode", "com.exafunction.windsurf",
+        "com.sublimetext.4", "com.panic.Nova", "com.barebones.bbedit", "com.coteditor.CotEditor",
+    ]
+
     @objc private func editConfig() {
         guard let url = manager?.configURL else { return }
-        NSWorkspace.shared.open([url], withApplicationAt: URL(fileURLWithPath: "/System/Applications/TextEdit.app"),
-                                configuration: NSWorkspace.OpenConfiguration())
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: url.path) {
+            try? fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? DefaultConfig.text.write(to: url, atomically: false, encoding: .utf8)
+        }
+        let ws = NSWorkspace.shared
+        let editor = StatusBar.editors.lazy.compactMap { ws.urlForApplication(withBundleIdentifier: $0) }.first
+            ?? ws.urlForApplication(toOpen: .plainText)
+            ?? URL(fileURLWithPath: "/System/Applications/TextEdit.app")
+        ws.open([url], withApplicationAt: editor, configuration: NSWorkspace.OpenConfiguration()) { _, error in
+            guard let error else { return }
+            DispatchQueue.main.async { self.alert("Couldn't open the config", error.localizedDescription) }
+        }
     }
 
     @objc private func showWarnings() {
-        let alert = NSAlert()
-        alert.messageText = "panespace config warnings"
-        alert.informativeText = manager?.configWarnings.joined(separator: "\n") ?? ""
+        alert("Panespace config warnings", manager?.configWarnings.joined(separator: "\n") ?? "")
+    }
+
+    @objc private func pickSetting(_ sender: NSMenuItem) {
+        guard let kv = sender.representedObject as? [String], kv.count == 2 else { return }
+        writeSetting(kv[0], kv[1])
+    }
+
+    @objc private func toggleFocusFollowsMouse() {
+        writeSetting("focus_follows_mouse", manager?.model.config.focusFollowsMouse == true ? "no" : "yes")
+    }
+
+    @objc private func toggleLogin() {
+        do { try LoginItem.set(!LoginItem.isEnabled) } catch { alert("Couldn't change Open at Login", error.localizedDescription) }
+    }
+
+    @objc private func about() {
+        let center = NSMutableParagraphStyle()
+        center.alignment = .center
+        let repo = "https://github.com/broisnischal/panespace"
+        let credits = NSAttributedString(string: "github.com/broisnischal/panespace", attributes: [
+            .link: URL(string: repo)!, .paragraphStyle: center, .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+        ])
         NSApp.activate(ignoringOtherApps: true)
-        alert.runModal()
+        NSApp.orderFrontStandardAboutPanel(options: [.credits: credits])
     }
 
     @objc private func quit() { manager?.shutdown() }
+
+    /// Writes one setting into the config and reloads: a menu choice acts like editing the file + reload.
+    /// Not an atomic write, so a config that is a symlink into a dotfiles repo stays a symlink.
+    private func writeSetting(_ key: String, _ value: String) {
+        guard let manager else { return }
+        let url = manager.configURL
+        do {
+            let text = (try? String(contentsOf: url, encoding: .utf8)) ?? DefaultConfig.text
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Config.setting(key, to: value, in: text).write(to: url, atomically: false, encoding: .utf8)
+            manager.reload()
+        } catch {
+            alert("Couldn't save the config", error.localizedDescription)
+        }
+    }
+
+    private func alert(_ title: String, _ text: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = text
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
+    }
 }
 
 /// Renders the workspace indicator as a template image (macOS tints it like its own icons).
@@ -165,6 +356,18 @@ enum WorkspaceIcon {
             ]],
         ])
         return NSFont(descriptor: desc, size: size) ?? base
+    }
+
+    /// The workspace's badge in the menu: Apple's "3.square(.fill)", or the first letter of a named workspace.
+    static func menuBadge(_ name: String, filled: Bool) -> NSImage? {
+        var glyph = ""
+        if let n = Int(name) {
+            if (0...50).contains(n) { glyph = "\(n)." }
+        } else if let c = name.first, c.isASCII, c.isLetter || c.isNumber {
+            glyph = c.lowercased() + "."
+        }
+        let image = NSImage(systemSymbolName: "\(glyph)square\(filled ? ".fill" : "")", accessibilityDescription: "Workspace \(name)")
+        return image?.withSymbolConfiguration(.init(pointSize: 14, weight: .regular))
     }
 
     private static func textWidth(_ s: String, _ f: NSFont) -> CGFloat {

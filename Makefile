@@ -46,6 +46,7 @@ define agent
 	  '<key>Label</key><string>app.panespace.$(1)</string>' \
 	  '<key>ProgramArguments</key><array><string>$(APPS_DIR)/$(1).app/Contents/MacOS/$(2)</string></array>' \
 	  '<key>RunAtLoad</key><true/>' \
+	  '<key>AssociatedBundleIdentifiers</key><string>app.panespace.$(1)</string>' \
 	  '<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>' \
 	  '<key>StandardErrorPath</key><string>$(HOME)/Library/Logs/$(2).log</string>' \
 	  '</dict></plist>' > $(AGENTS)/app.panespace.$(1).plist
