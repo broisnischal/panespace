@@ -291,6 +291,19 @@ public final class Model {
         setFocus(w)
     }
 
+    /// A window came out bigger than its tile: the app has a minimum size. Tiles are laid out around it from now
+    /// on. Returns whether that changed anything.
+    @discardableResult
+    public func noteMinimumSize(_ id: WindowID, actual: CGSize, wanted: CGSize) -> Bool {
+        guard let w = windows[id], !w.isFloating else { return false }
+        var m = w.minSize
+        if actual.width > wanted.width + 2 { m.width = max(m.width, actual.width) }
+        if actual.height > wanted.height + 2 { m.height = max(m.height, actual.height) }
+        guard m != w.minSize else { return false }
+        w.minSize = m
+        return true
+    }
+
     /// Records the real frame of a visible floating window.
     public func syncFloatingFrame(_ id: WindowID, _ f: CGRect) {
         guard let w = windows[id], w.isFloating, !w.floatingFrameDirty else { return }
@@ -345,18 +358,22 @@ public final class Model {
     }
 
     /// The user resized a tiled window with the mouse: turn the new edges into weights.
-    public func userResized(_ id: WindowID, to f: CGRect) {
+    /// `from` is the window's real frame before this step. Apps that snap their size (terminals) never quite
+    /// match `rect`, so diffing against `rect` would read that snap as a drag. Without `from`, `rect` is used
+    /// with a little slack.
+    public func userResized(_ id: WindowID, from: CGRect? = nil, to f: CGRect) {
         guard let w = windows[id], !w.isFloating, let ws = w.workspace, ws.fullscreen !== w else { return }
-        let old = w.rect
+        let old = from ?? w.rect
+        let slack: CGFloat = from == nil ? 2 : 0.5
         let inner = config.gaps.inner
-        if abs(f.minX - old.minX) > 2 {
+        if abs(f.minX - old.minX) > slack {
             ws.resize(w, axis: .horizontal, amount: .px(old.minX - f.minX), towardStart: true, inner: inner)
-        } else if abs(f.maxX - old.maxX) > 2 {
+        } else if abs(f.maxX - old.maxX) > slack {
             ws.resize(w, axis: .horizontal, amount: .px(f.maxX - old.maxX), towardStart: false, inner: inner)
         }
-        if abs(f.minY - old.minY) > 2 {
+        if abs(f.minY - old.minY) > slack {
             ws.resize(w, axis: .vertical, amount: .px(old.minY - f.minY), towardStart: true, inner: inner)
-        } else if abs(f.maxY - old.maxY) > 2 {
+        } else if abs(f.maxY - old.maxY) > slack {
             ws.resize(w, axis: .vertical, amount: .px(f.maxY - old.maxY), towardStart: false, inner: inner)
         }
     }

@@ -187,16 +187,17 @@ extension Workspace {
                 if let j {
                     var len = (axis == .horizontal ? p.rect.width : p.rect.height) - inner * CGFloat(k - 1)
                     if len <= 0 { len = 1000 }
-                    let total = p.children.reduce(0) { $0 + $1.weight }
-                    var sizes = p.children.map { $0.weight / total * len }
+                    // Start from the sizes on screen, which already honour the apps' minimum sizes.
+                    let mins = p.children.map { LayoutEngine.minLength($0, horizontal: axis == .horizontal, inner: inner) }
+                    var sizes = LayoutEngine.distribute(len, weights: p.children.map { max($0.weight, 0.0001) }, mins: mins)
                     var d: CGFloat
                     switch amount {
                     case .px(let v): d = v
                     case .ppt(let v): d = v * len / 100
                     }
-                    let minSize = max(len * 0.05, 40)
-                    d = min(d, sizes[j] - minSize)
-                    d = max(d, minSize - sizes[i])
+                    let least = max(len * 0.05, 40)
+                    d = min(d, sizes[j] - max(least, mins[j]))
+                    d = max(d, max(least, mins[i]) - sizes[i])
                     sizes[i] += d
                     sizes[j] -= d
                     for (n, s) in zip(p.children, sizes) { n.weight = s }

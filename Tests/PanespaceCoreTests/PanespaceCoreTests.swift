@@ -155,6 +155,45 @@ final class TreeTests: XCTestCase {
         XCTAssertEqual(frame(3)?.width, 234)
     }
 
+    func testAppMinimumSizeIsTiledAround() {
+        add(1, 2)
+        _ = m.placements()
+        // Window 1 refused to go below 700 wide: its neighbour gets what's left instead of being overlapped.
+        XCTAssertTrue(m.noteMinimumSize(1, actual: CGSize(width: 700, height: 500), wanted: CGSize(width: 500, height: 500)))
+        XCTAssertFalse(m.noteMinimumSize(1, actual: CGSize(width: 700, height: 500), wanted: CGSize(width: 500, height: 500)))
+        XCTAssertEqual(frame(1)?.width, 700)
+        XCTAssertEqual(frame(2), CGRect(x: 700, y: 0, width: 300, height: 500))
+        // Resizing can't squeeze it below that either.
+        m.userResized(2, to: CGRect(x: 600, y: 0, width: 400, height: 500))
+        XCTAssertEqual(frame(1)?.width, 700)
+        XCTAssertEqual(frame(2)?.width, 300)
+    }
+
+    func testDistributeHonoursMinimums() {
+        XCTAssertEqual(LayoutEngine.distribute(900, weights: [1, 1, 1], mins: [0, 0, 0]), [300, 300, 300])
+        XCTAssertEqual(LayoutEngine.distribute(900, weights: [1, 1, 1], mins: [500, 0, 0]), [500, 200, 200])
+        XCTAssertEqual(LayoutEngine.distribute(900, weights: [1, 2, 1], mins: [0, 0, 300]), [200, 400, 300])
+        XCTAssertEqual(LayoutEngine.distribute(900, weights: [1, 1], mins: [600, 600]), [450, 450])
+    }
+
+    func testMouseResizeDiffsAgainstRealFrame() {
+        add(1, 2)
+        _ = m.placements()
+        // A terminal snapped itself 7 px narrower and 9 px shorter than its slot. Dragging its right edge
+        // 50 px must move the split by 50, and the snapped height must not read as a vertical drag.
+        let real = CGRect(x: 0, y: 0, width: 493, height: 491)
+        m.userResized(1, from: real, to: CGRect(x: 0, y: 0, width: 543, height: 491))
+        XCTAssertEqual(frame(1)?.width, 550)
+        XCTAssertEqual(frame(2)?.width, 450)
+        XCTAssertEqual(frame(1)?.height, 500)
+        // Live drags arrive 1 px at a time; each step must count.
+        for x in 0..<10 {
+            let w = CGFloat(543 + x)
+            m.userResized(1, from: CGRect(x: 0, y: 0, width: w, height: 491), to: CGRect(x: 0, y: 0, width: w + 1, height: 491))
+        }
+        XCTAssertEqual(frame(1)?.width, 560)
+    }
+
     func testDragDropSwaps() {
         add(1, 2, 3)
         _ = m.placements()

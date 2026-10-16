@@ -114,7 +114,17 @@ final class WindowManager {
     /// Consecutive syncs a still-existing window was missing from its app's list.
     private var missing: [WindowID: Int] = [:]
     private var dragged: [WindowID: Bool] = [:]  // true = was resized
+    /// Last frame each window reported, the baseline for diffing a mouse resize (apps snap sizes, so not `rect`).
+    private var seenFrame: [WindowID: CGRect] = [:]
+    /// The tiled window whose edge the user is dragging; its neighbours are re-tiled live around it.
+    private var liveResize: WindowID?
+    private var liveApplyBusy = false
+    private var liveApplyAgain = false
+    /// Mouse is up but `mouseUp` hasn't run yet; drag notifications still in flight count as the drag.
+    private var mouseUpPending = false
     private var modDrag: ModDrag?
+    /// Bumped on every mod-drag begin and end, so a hit test that lands after its drag ended is dropped.
+    private var modDragGeneration = 0
     private var lastFocused: WindowID?
     private var pendingFocus: (id: WindowID, until: Date)?
     private var lastFocusedMonitor: MonitorID?
@@ -409,12 +419,20 @@ final class WindowManager {
     }
 
     private func windowMoved(_ id: WindowID, frame: CGRect?, resized: Bool) {
-        guard model.windows[id] != nil, modDrag == nil else { return }
-        if tap.isMouseDown {
+        guard let w = model.windows[id], modDrag == nil else { return }
+        if tap.isMouseDown || mouseUpPending {
+            if let live = liveResize, live != id { return }  // our own re-tiling of its neighbours
+            if resized, !w.isFloating, let f = frame {
+                liveResize = id
+                model.userResized(id, from: seenFrame[id] ?? lastApplied[id], to: f)
+                seenFrame[id] = f
+                liveApply()
+            }
             dragged[id] = (dragged[id] ?? false) || resized
             border.hide()
             return
         }
+        if let frame { seenFrame[id] = frame }
         // The app moved its own window (e.g. restored a saved frame). Put it back, at most once a second
         // so apps that snap sizes (terminals) can't make us loop.
         guard let target = lastApplied[id], let f = frame,
@@ -453,26 +471,42 @@ final class WindowManager {
     }
 
     private func mouseUp() {
-        // Give the window server a beat to settle the final frame.
+        mouseUpPending = true
+        // Give the window server a beat to settle the final frames, then read them off the main thread.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [self] in
-            if !dragged.isEmpty {
-                let cursor = CGEvent(source: nil)?.location
-                for (id, resized) in dragged {
-                    guard let w = model.windows[id], let f = elements[id]?.frame else { continue }
-                    if w.isFloating {
-                        model.floatingWindowDropped(id, frame: f)
-                        continue
-                    }
-                    if resized { model.userResized(id, to: f) } else if let c = cursor { model.userDropped(id, at: c) }
-                    lastApplied[id] = nil
-                    appliedSize[id] = nil
-                }
-                dragged.removeAll()
+            let targets = dragged.keys.compactMap { id in elements[id].map { (id, $0) } }
+            guard !targets.isEmpty else { return dragEnded([:]) }
+            eventQueue.async { [weak self] in
+                var frames: [WindowID: CGRect] = [:]
+                for (id, el) in targets { frames[id] = el.frame }
+                DispatchQueue.main.async { self?.dragEnded(frames) }
             }
-            refreshOSFocus()
-            scheduleApply()
-            startSync()  // anything deferred while the button was down
         }
+    }
+
+    private func dragEnded(_ frames: [WindowID: CGRect]) {
+        mouseUpPending = false
+        liveResize = nil
+        let cursor = CGEvent(source: nil)?.location
+        for (id, resized) in dragged {
+            guard let w = model.windows[id], let f = frames[id] else { continue }
+            if w.isFloating {
+                model.floatingWindowDropped(id, frame: f)
+                continue
+            }
+            if resized {
+                model.userResized(id, from: seenFrame[id], to: f)
+                seenFrame[id] = f
+            } else if let c = cursor {
+                model.userDropped(id, at: c)
+            }
+            lastApplied[id] = nil
+            appliedSize[id] = nil
+        }
+        dragged.removeAll()
+        refreshOSFocus()
+        scheduleApply()
+        startSync()  // anything deferred while the button was down
     }
 
     private func mouseMoved(_ p: CGPoint) {
@@ -487,6 +521,7 @@ final class WindowManager {
         model.setMonitors(Screens.read())
         lastApplied.removeAll()
         appliedSize.removeAll()
+        seenFrame.removeAll()
         hiddenByUs.removeAll()  // re-hide on the new geometry
         requestSync(.all)
         scheduleApply()
@@ -508,10 +543,26 @@ final class WindowManager {
 
     private func modDragBegan(at p: CGPoint, resize: Bool) {
         border.hide()  // also keeps the AX hit test below from landing on our own overlay
-        let hit = window(under: p)
-        if debug { log("modDrag begin at \(p) resize=\(resize) → \(hit.map { "\($0.0)" } ?? "no window")") }
-        guard let (id, el) = hit, let w = model.windows[id],
-              let frame = w.isFloating ? el.frame : w.rect else { return }
+        modDragGeneration += 1
+        let generation = modDragGeneration
+        // The AX hit test asks the app under the cursor, so it runs off the main thread. It must never reach our
+        // own process (menu bar item), so only inside work areas.
+        let inWorkArea = model.monitors.contains { $0.visibleFrame.contains(p) }
+        eventQueue.async { [weak self] in
+            let hit = inWorkArea ? WindowManager.axWindow(at: p) : nil
+            DispatchQueue.main.async {
+                guard let self, generation == self.modDragGeneration else { return }  // the drag already ended
+                self.startModDrag(at: p, resize: resize, hit: hit)
+            }
+        }
+    }
+
+    private func startModDrag(at p: CGPoint, resize: Bool, hit: (id: WindowID, frame: CGRect?)?) {
+        // Floating before tiled, as the user sees them, when the hit test found nothing of ours.
+        let target = hit.flatMap { model.windows[$0.id] != nil ? $0 : nil } ?? model.window(at: p).map { (id: $0.id, frame: nil) }
+        if debug { log("modDrag begin at \(p) resize=\(resize) → \(target.map { "\($0.id)" } ?? "no window")") }
+        guard let (id, axFrame) = target, let w = model.windows[id], let el = elements[id],
+              let frame = w.isFloating ? axFrame ?? w.floatingFrame : w.rect else { return }
         if id != model.focusedWindow?.id {
             model.osFocused(id)
             apply(warp: false)
@@ -549,11 +600,28 @@ final class WindowManager {
         } else {
             // Tiled: turn the dragged edges into split weights and re-layout live.
             model.userResized(d.id, to: f)
-            apply(warp: false)
+            liveApply()
+        }
+    }
+
+    /// Re-tiles during a drag, at most one batch of writes in flight, so slow apps can't pile up a backlog.
+    /// The window under the user's resize is left alone; writing to it would fight the drag.
+    private func liveApply() {
+        guard !liveApplyBusy else { return liveApplyAgain = true }
+        liveApplyBusy = true
+        apply(warp: false, leave: liveResize)
+        axQueue.async {
+            DispatchQueue.main.async { [self] in
+                liveApplyBusy = false
+                let again = liveApplyAgain
+                liveApplyAgain = false
+                if again, tap.isMouseDown || mouseUpPending || modDrag != nil { liveApply() }  // else mouse-up applies
+            }
         }
     }
 
     private func modDragEnded(at p: CGPoint) {
+        modDragGeneration += 1
         guard let d = modDrag else { return }
         modDragMoved(to: p)
         modDrag = nil
@@ -574,19 +642,13 @@ final class WindowManager {
         startSync()
     }
 
-    /// Topmost managed window under `p`.
-    private func window(under p: CGPoint) -> (WindowID, AXUIElement)? {
-        // AX hit test is exact but must never reach our own process (menu bar item), so stay inside work areas.
-        if model.monitors.contains(where: { $0.visibleFrame.contains(p) }) {
-            var hit: AXUIElement?
-            if AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), Float(p.x), Float(p.y), &hit) == .success,
-               let hit, let win = hit.role == kAXWindowRole ? hit : hit.element(kAXWindowAttribute),
-               let id = win.windowID, model.windows[id] != nil, let el = elements[id] {
-                return (id, el)
-            }
-        }
-        if let w = model.window(at: p), let el = elements[w.id] { return (w.id, el) }
-        return nil
+    /// Topmost window under `p` and its frame, by AX hit test. Blocks on the app, so never on the main thread.
+    private static func axWindow(at p: CGPoint) -> (id: WindowID, frame: CGRect?)? {
+        var hit: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), Float(p.x), Float(p.y), &hit) == .success,
+              let hit, let win = hit.role == kAXWindowRole ? hit : hit.element(kAXWindowAttribute),
+              let id = win.windowID else { return nil }
+        return (id, win.frame)
     }
 
     // MARK: Window discovery
@@ -623,6 +685,7 @@ final class WindowManager {
         let pid: pid_t
         let info: WindowInfo?  // nil for windows the model already knew when the scan started
         let kind: WindowKind
+        var frame: CGRect? = nil  // new windows only, read here so the main thread never asks the app
     }
 
     func scheduleApply() {
@@ -707,7 +770,7 @@ final class WindowManager {
                     guard kind != .ignore else { continue }
                     t.watch(w, id: id, refcon: refcon)
                     local[id] = Seen(el: w, pid: pid, info: WindowInfo(app: name, bundleID: bundle, title: w.title, pid: pid),
-                                     kind: kind)
+                                     kind: kind, frame: w.frame)
                 }
                 lock.withLock {
                     result.seen.merge(local) { a, _ in a }
@@ -777,7 +840,7 @@ final class WindowManager {
                 if e.workspace == nil { model.run("move scratchpad", on: id) }
                 continue  // rules already ran in the previous session
             }
-            model.addWindow(id, info: info, floating: s.kind == .float, frame: s.el.frame, useMonitorOfFrame: startup)
+            model.addWindow(id, info: info, floating: s.kind == .float, frame: s.frame, useMonitorOfFrame: startup)
             added.append(id)
         }
         if startup, case .all = scope {
@@ -818,6 +881,8 @@ final class WindowManager {
         reappliedAt[id] = nil
         missing[id] = nil
         dragged[id] = nil
+        seenFrame[id] = nil
+        if liveResize == id { liveResize = nil }
         if lastFocused == id { lastFocused = nil }
     }
 
@@ -838,7 +903,7 @@ final class WindowManager {
 
     /// Makes the real windows match the model. Bookkeeping happens here on main; the AX writes and the
     /// focus change are queued in order on `axQueue`, so the main thread never waits for an app.
-    private func apply(warp: Bool = true) {
+    private func apply(warp: Bool = true, leave: WindowID? = nil) {
         let placements = model.placements()
         let fallback = model.focusedMonitor.visibleFrame
         var show: [pid_t: [Job]] = [:]
@@ -848,7 +913,7 @@ final class WindowManager {
             let wasHidden = hiddenByUs.contains(id)
             switch p {
             case .tiled(let r):
-                if lastApplied[id] == r && !wasHidden { continue }
+                if id == leave || (lastApplied[id] == r && !wasHidden) { continue }
                 show[pid, default: []].append(Job(id: id, el: el, action: .frame(r, positionOnly: appliedSize[id] == r.size,
                                                                                   from: wasHidden ? nil : lastApplied[id])))
                 lastApplied[id] = r
@@ -894,11 +959,11 @@ final class WindowManager {
                 }
             }
             axQueue.async { [weak self] in
-                var floating = WindowManager.write(show, monitors: monitors)
+                var written = WindowManager.write(show, monitors: monitors)
                 // Park the old workspace only once the new one is really on screen; otherwise apps that are slow
                 // to move (tens of ms) leave a frame of bare desktop in between: the "flicker".
                 WindowManager.waitUntilShown(arriving, timeout: 0.08)
-                floating += WindowManager.write(hide, monitors: monitors)
+                written.floating += WindowManager.write(hide, monitors: monitors).floating
                 if let fj = focusJob {
                     Focus.focus(pid: fj.pid, windowID: fj.id, element: fj.el)
                     // Tahoe sometimes leaves another app's window on top; raise once more unless focus moved on.
@@ -906,8 +971,8 @@ final class WindowManager {
                         if generation.value == fj.gen { fj.el.perform(kAXRaiseAction) }
                     }
                 }
-                if !floating.isEmpty {
-                    DispatchQueue.main.async { for (id, f) in floating { self?.model.syncFloatingFrame(id, f) } }
+                if !written.floating.isEmpty || !written.oversized.isEmpty {
+                    DispatchQueue.main.async { self?.afterWrite(written) }
                 }
             }
         }
@@ -924,25 +989,54 @@ final class WindowManager {
         updateStatus()
     }
 
-    /// Runs on `axQueue`. One thread per app; returns the frames of floating windows read before hiding them.
-    private static func write(_ groups: [pid_t: [Job]], monitors: [Monitor]) -> [(WindowID, CGRect)] {
-        guard !groups.isEmpty else { return [] }
+    private struct Written {
+        /// Floating windows' frames, read just before hiding them.
+        var floating: [(WindowID, CGRect)] = []
+        /// Windows that came out bigger than their tile: the app won't go smaller.
+        var oversized: [(id: WindowID, actual: CGSize, wanted: CGSize)] = []
+    }
+
+    private func afterWrite(_ w: Written) {
+        for (id, f) in w.floating { model.syncFloatingFrame(id, f) }
+        guard !w.oversized.isEmpty else { return }
+        // Look again shortly: an app that is merely slow to resize must not be mistaken for one with a minimum.
+        let checks = w.oversized.compactMap { o in elements[o.id].map { (o, $0) } }
+        eventQueue.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            let still = checks.compactMap { o, el in el.size.map { (o.id, $0, o.wanted) } }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                var relayout = false
+                for (id, actual, wanted) in still where self.lastApplied[id]?.size == wanted
+                    && self.model.noteMinimumSize(id, actual: actual, wanted: wanted) {
+                    if self.debug { log("window \(id) won't go below \(actual) (asked \(wanted)); tiling around it") }
+                    relayout = true
+                }
+                if relayout { self.scheduleApply() }
+            }
+        }
+    }
+
+    /// Runs on `axQueue`. One thread per app.
+    private static func write(_ groups: [pid_t: [Job]], monitors: [Monitor]) -> Written {
+        guard !groups.isEmpty else { return Written() }
         let list = Array(groups)
         let lock = NSLock()
-        var floatingFrames: [(WindowID, CGRect)] = []
+        var out = Written()
         DispatchQueue.concurrentPerform(iterations: list.count) { i in
             let (pid, jobs) = list[i]
             let app = AXUIElement.app(pid)
             // Some apps animate frame changes while this is on (set by e.g. VoiceOver/Magnet).
             let enhanced = app.bool("AXEnhancedUserInterface") == true
             if enhanced { app.set("AXEnhancedUserInterface", false) }
-            var local: [(WindowID, CGRect)] = []
+            var local = Written()
             for job in jobs {
                 switch job.action {
                 case .frame(let r, let positionOnly, let from):
                     if positionOnly {
                         job.el.setPosition(r.origin)
-                    } else if let f = from, sameMonitor(f, r, monitors) {
+                        continue
+                    }
+                    if let f = from, sameMonitor(f, r, monitors) {
                         // Growing: move first, then grow into place. Shrinking: shrink first, then move.
                         // Either way the window never pokes past its final edges mid-change.
                         if r.width > f.width || r.height > f.height {
@@ -955,19 +1049,30 @@ final class WindowManager {
                     } else {
                         job.el.setFrame(r)  // new or crossing monitors: size → position → size
                     }
+                    // Asked to get smaller: an app with a minimum size stops short and overlaps its neighbour.
+                    // One read to find out, so the layout can make room.
+                    if from.map({ r.width < $0.width - 0.5 || r.height < $0.height - 0.5 }) ?? true, let s = job.el.size,
+                       s.width > r.width + 2 || s.height > r.height + 2 {
+                        local.oversized.append((job.id, s, r.size))
+                    }
                 case .center(let v):
                     if let s = job.el.size {
                         job.el.setPosition(CGPoint(x: v.midX - s.width / 2, y: v.midY - s.height / 2))
                     }
                 case .hide(let mid, let knownWidth, let readFrame):
-                    if readFrame, let f = job.el.frame { local.append((job.id, f)) }
+                    if readFrame, let f = job.el.frame { local.floating.append((job.id, f)) }
                     job.el.setPosition(hidePoint(mid, monitors: monitors) { knownWidth ?? job.el.size?.width ?? 0 })
                 }
             }
             if enhanced { app.set("AXEnhancedUserInterface", true) }
-            if !local.isEmpty { lock.withLock { floatingFrames += local } }
+            if !local.floating.isEmpty || !local.oversized.isEmpty {
+                lock.withLock {
+                    out.floating += local.floating
+                    out.oversized += local.oversized
+                }
+            }
         }
-        return floatingFrames
+        return out
     }
 
     /// Polls the window server (cheap, no app round trip) until every window is at its target origin.

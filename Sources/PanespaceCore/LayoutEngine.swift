@@ -10,6 +10,40 @@ public struct Gaps: Equatable {
 }
 
 enum LayoutEngine {
+    /// Splits `length` by weight, but gives no child less than its minimum; the others make up the difference in
+    /// proportion. When the minimums can't all fit, plain proportions: overlap is unavoidable either way.
+    static func distribute(_ length: CGFloat, weights: [CGFloat], mins: [CGFloat]) -> [CGFloat] {
+        let total = weights.reduce(0, +)
+        guard mins.reduce(0, +) <= length, mins.contains(where: { $0 > 0 }) else { return weights.map { length * $0 / total } }
+        var sizes = [CGFloat](repeating: 0, count: weights.count)
+        var open = Array(weights.indices)
+        var left = length
+        while true {
+            let share = open.reduce(0) { $0 + weights[$1] }
+            let short = open.filter { left * weights[$0] / share < mins[$0] }
+            if short.isEmpty {
+                for i in open { sizes[i] = left * weights[i] / share }
+                return sizes
+            }
+            for i in short {
+                sizes[i] = mins[i]
+                left -= mins[i]
+            }
+            open.removeAll { short.contains($0) }
+        }
+    }
+
+    /// The least room `n` needs along one axis, from the minimum sizes its windows were seen to refuse to go below.
+    static func minLength(_ n: Node, horizontal: Bool, inner: CGFloat) -> CGFloat {
+        if let w = n as? WindowNode { return horizontal ? w.minSize.width : w.minSize.height }
+        guard let c = n as? Container, !c.children.isEmpty else { return 0 }
+        let mins = c.children.map { minLength($0, horizontal: horizontal, inner: inner) }
+        if c.layout.isSplit, (c.layout.orientation == .horizontal) == horizontal {
+            return mins.reduce(0, +) + inner * CGFloat(c.children.count - 1)
+        }
+        return mins.max() ?? 0  // across the split, or stacked/tabbed: every child spans the whole container
+    }
+
     /// Frames for every tiled window of `ws` on `monitor` (plus a fullscreen window, if any).
     /// Also records each node's rect for geometry-based commands.
     static func layout(_ ws: Workspace, on monitor: Monitor, config: Config) -> [WindowID: CGRect] {
@@ -37,11 +71,12 @@ enum LayoutEngine {
 
         if c.layout.isSplit {
             let length = (horizontal ? r.width : r.height) - inner * CGFloat(k - 1)
-            let total = c.children.reduce(0) { $0 + max($1.weight, 0.0001) }
+            let sizes = distribute(length, weights: c.children.map { max($0.weight, 0.0001) },
+                                   mins: c.children.map { minLength($0, horizontal: horizontal, inner: inner) })
             var pos = horizontal ? r.minX : r.minY
             for (i, child) in c.children.enumerated() {
                 let end = horizontal ? r.maxX : r.maxY
-                let size = i == k - 1 ? end - pos : (length * max(child.weight, 0.0001) / total).rounded()
+                let size = i == k - 1 ? end - pos : sizes[i].rounded()
                 let cr = horizontal
                     ? CGRect(x: pos, y: r.minY, width: size, height: r.height)
                     : CGRect(x: r.minX, y: pos, width: r.width, height: size)

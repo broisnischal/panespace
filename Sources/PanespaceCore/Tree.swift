@@ -132,6 +132,8 @@ public final class WindowNode: Node {
     public internal(set) var floatingFrameDirty = false
     /// Window came from (or lives in) the scratchpad.
     public internal(set) var isScratchpad = false
+    /// Smallest size the app was seen to accept; tiling gives it at least this much when there's room.
+    public internal(set) var minSize: CGSize = .zero
     weak var floatingWorkspace: Workspace?
 
     public init(id: WindowID, info: WindowInfo) {
