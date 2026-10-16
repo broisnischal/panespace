@@ -1,52 +1,37 @@
 import Foundation
 
-/// Immersive mode (Omarchy-style): the macOS menu bar and Dock auto-hide, so tiles and fullscreen
-/// windows use the whole display. Changes the real macOS settings through System Events (asks for
-/// Automation permission once) and puts back what it found when panespace quits.
+/// Immersive mode (Omarchy-style): the macOS menu bar auto-hides, so tiles and fullscreen windows use the
+/// whole display. Changes the real macOS setting through System Events (asks for Automation permission once)
+/// and puts back what it found when panespace quits. The Dock is never touched: it follows its own macOS
+/// setting (System Settings → Desktop & Dock → "Automatically hide and show the Dock").
 final class MacChrome {
     private(set) var isImmersive: Bool
-    private var original: (menuBar: Bool, dock: Bool)?
+    private var original: Bool?
 
-    init() { isImmersive = MacChrome.menuBarHidden() && MacChrome.dockHidden() }
+    init() { isImmersive = MacChrome.menuBarHidden() }
 
     static func menuBarHidden() -> Bool {
         (UserDefaults.standard.persistentDomain(forName: UserDefaults.globalDomain)?["_HIHideMenuBar"] as? Bool) ?? false
     }
 
-    static func dockHidden() -> Bool { UserDefaults(suiteName: "com.apple.dock")?.bool(forKey: "autohide") ?? false }
-
     func set(_ on: Bool) {
-        if !on && !isImmersive {
-            // `immersive no` / `immersive disable`: show both bars even if only one was left auto-hidden.
-            if MacChrome.menuBarHidden() || MacChrome.dockHidden() { write(menuBar: false, dock: false, wait: false) }
-            return
-        }
         guard on != isImmersive else { return }
-        if original == nil { original = (MacChrome.menuBarHidden(), MacChrome.dockHidden()) }
-        let target: (Bool, Bool)
-        if on {
-            target = (true, true)
-        } else if let o = original, !(o.menuBar && o.dock) {
-            target = o
-        } else {
-            target = (false, false)
-        }
+        if original == nil { original = MacChrome.menuBarHidden() }
         isImmersive = on
-        write(menuBar: target.0, dock: target.1, wait: false)
+        write(menuBarHidden: on, wait: false)
     }
 
     /// Called on quit: leave the user's Mac as panespace found it.
     func restore() {
         guard let o = original else { return }
-        write(menuBar: o.menuBar, dock: o.dock, wait: true)
+        write(menuBarHidden: o, wait: true)
         original = nil
     }
 
-    private func write(menuBar: Bool, dock: Bool, wait: Bool) {
+    private func write(menuBarHidden: Bool, wait: Bool) {
         let script = """
         tell application "System Events" to tell dock preferences
-            set autohide menu bar to \(menuBar)
-            set autohide to \(dock)
+            set autohide menu bar to \(menuBarHidden)
         end tell
         """
         let p = Process()

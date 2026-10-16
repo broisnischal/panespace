@@ -84,7 +84,7 @@ final class StatusBar: NSObject, NSMenuDelegate {
         let immersive = menuItem("Immersive Mode", #selector(toggleImmersive), shortcut: "immersive toggle",
                                  symbol: "rectangle.inset.filled")
         immersive.state = manager.chrome.isImmersive ? .on : .off
-        immersive.toolTip = "Auto-hide the menu bar and Dock so windows use the whole screen"
+        immersive.toolTip = "Auto-hide the menu bar so windows use the whole screen (the Dock follows its macOS setting)"
         menu.addItem(immersive)
         menu.addItem(settingsItem(manager))
         menu.addItem(.separator())
