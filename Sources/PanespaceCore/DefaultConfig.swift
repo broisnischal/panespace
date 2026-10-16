@@ -72,7 +72,8 @@ bindsym $mod+f fullscreen toggle
 # for a separate macOS Space (where they can't be tiled). "native_fullscreen macos" turns this off.
 native_fullscreen panespace
 # Immersive (Omarchy-style): auto-hide the macOS menu bar and Dock so tiles and fullscreen use the
-# whole display. Toggle with $mod+Shift+f, or start in it with: immersive yes
+# whole display. Toggle with $mod+Shift+f. "immersive yes" starts in it; "immersive no" always starts
+# with both shown.
 bindsym $mod+Shift+f immersive toggle
 bindsym $mod+Shift+space floating toggle
 bindsym $mod+Shift+equal balance

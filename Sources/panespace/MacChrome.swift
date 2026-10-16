@@ -16,6 +16,11 @@ final class MacChrome {
     static func dockHidden() -> Bool { UserDefaults(suiteName: "com.apple.dock")?.bool(forKey: "autohide") ?? false }
 
     func set(_ on: Bool) {
+        if !on && !isImmersive {
+            // `immersive no` / `immersive disable`: show both bars even if only one was left auto-hidden.
+            if MacChrome.menuBarHidden() || MacChrome.dockHidden() { write(menuBar: false, dock: false, wait: false) }
+            return
+        }
         guard on != isImmersive else { return }
         if original == nil { original = (MacChrome.menuBarHidden(), MacChrome.dockHidden()) }
         let target: (Bool, Bool)
