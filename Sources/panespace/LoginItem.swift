@@ -24,6 +24,8 @@ enum LoginItem {
             "ProgramArguments": [Bundle.main.executablePath ?? CommandLine.arguments[0]],
             "RunAtLoad": true,
             "KeepAlive": ["SuccessfulExit": false],
+            // launchd throttles agents by default (coalesced timers stretch animations); this one is interactive.
+            "ProcessType": "Interactive",
             "StandardErrorPath": home.appendingPathComponent("Library/Logs/panespace.log").path,
             "AssociatedBundleIdentifiers": [label],  // System Settings → Login Items shows it as Panespace
         ]

@@ -53,6 +53,7 @@ define agent
 	  '<key>RunAtLoad</key><true/>' \
 	  '<key>AssociatedBundleIdentifiers</key><string>app.panespace.$(1)</string>' \
 	  '<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>' \
+	  '<key>ProcessType</key><string>Interactive</string>' \
 	  '<key>StandardErrorPath</key><string>$(HOME)/Library/Logs/$(2).log</string>' \
 	  '</dict></plist>' > $(AGENTS)/app.panespace.$(1).plist
 	launchctl bootout gui/$$(id -u) $(AGENTS)/app.panespace.$(1).plist 2>/dev/null || true

@@ -41,7 +41,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var waitItem: NSStatusItem?
     private var waitTimer: Timer?
 
+    /// Held for the app's lifetime: App Nap would coalesce our timers and stretch animations and key handling.
+    /// Idle system sleep stays allowed.
+    private var activity: NSObjectProtocol?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical],
+                                                         reason: "Tiling windows")
         let prompt = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         if AXIsProcessTrustedWithOptions(prompt) { return start() }
         log("waiting for Accessibility permission (System Settings → Privacy & Security → Accessibility)")
