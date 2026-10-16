@@ -21,7 +21,9 @@
 - **i3 layouts.** Horizontal and vertical splits, tabbed and stacking containers, and i3's `move` rules.
 - **Instant workspaces.** Panespace keeps its own workspaces, separate from macOS Spaces. Switching has no animation.
 - **i3 config syntax.** `bindsym`, modes, `for_window` / `assign` rules, gaps, scratchpad, `back_and_forth`.
-- **Mouse.** Drag the edge between two windows and both resize live. Drop a window on another to swap them.
+- **Mouse.** Drag the edge between two windows and both resize live. Drop a window on another to swap them. Double-click a title bar to zoom that window to the full screen; double-click again to put it back.
+- **Animations.** Windows glide when the layout changes: opening and closing, moving and swapping, resizing, and switching workspaces, which slide like macOS Spaces. Turn them off with `animations no`.
+- **Menu bar.** Shows the current workspace. Its menu switches workspaces, floats or fullscreens the focused window, changes the layout, and edits settings.
 - **Menu bar.** Shows the current workspace. Its menu switches workspaces, floats or fullscreens the focused window, changes the layout, and edits settings.
 - **Immersive mode.** Auto-hides the macOS menu bar and Dock, so windows fill the whole display.
 - **Multi-monitor.** Move focus, windows and whole workspaces between displays.
@@ -73,6 +75,7 @@ bindsym $mod+Return exec open -na Ghostty
 gaps inner 8
 smart_gaps on
 focus_follows_mouse no
+animations yes                     # animation_duration 180 (ms)
 workspace_indicator number         # menu bar: number | segmented | dots | tiles
 floating_modifier $mod             # $mod+drag moves, $mod+right-drag resizes
 
@@ -98,6 +101,7 @@ panespace msg -t get_tree        # get_workspaces, get_config, get_version, …
 ## How it works
 
 - Panespace uses the Accessibility API only. Windows on hidden workspaces are moved to the corner of the screen, so switching workspaces is a single move per window.
+- Animations write every frame to all windows together, one thread per app, and take their timing from the clock: a slow app drops frames but never delays the layout. A new change interrupts a running animation and carries on from where each window is.
 - The layout tree, config parser and command engine are a plain Swift module (`PanespaceCore`) with unit tests.
 - The main thread never waits on another app. Window moves run on background queues, one thread per app, so one frozen app can't stall the rest.
 - If an app won't shrink below a minimum size, its neighbours make room instead of overlapping it.

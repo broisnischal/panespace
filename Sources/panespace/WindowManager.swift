@@ -122,6 +122,23 @@ final class WindowManager {
     private var liveApplyAgain = false
     /// Mouse is up but `mouseUp` hasn't run yet; drag notifications still in flight count as the drag.
     private var mouseUpPending = false
+    // Layout animation.
+    private let animGeneration = Counter()
+    private let liveFrames = FrameStore()
+    /// Windows the running animation is moving; a newer layout picks them up mid-flight.
+    private var animating = Set<WindowID>()
+    /// After an animation, late move notifications for its windows are ours, not the app's.
+    private var settling: [WindowID: Date] = [:]
+    /// Windows whose real frame we don't know (new, or moved by their app or macOS): animate from a fresh read.
+    private var unsure = Set<WindowID>()
+    /// The workspace each monitor showed at the last layout, to tell which way a switch slides.
+    private var shownOn: [MonitorID: String] = [:]
+    /// The next layout jumps instead of gliding (the displays changed).
+    private var instantNext = false
+    /// Layouts wait until then (macOS is still running its own zoom animation).
+    private var holdApplyUntil = Date.distantPast
+    /// The title-bar double-click that already became a zoom.
+    private var zoomedClick = 0
     private var modDrag: ModDrag?
     /// Bumped on every mod-drag begin and end, so a hit test that lands after its drag ended is dropped.
     private var modDragGeneration = 0
@@ -420,7 +437,17 @@ final class WindowManager {
 
     private func windowMoved(_ id: WindowID, frame: CGRect?, resized: Bool) {
         guard let w = model.windows[id], modDrag == nil else { return }
-        if tap.isMouseDown || mouseUpPending {
+        // Our own animation frames, and their stragglers.
+        if animating.contains(id) || (settling[id].map { Date() < $0 } ?? false) { return }
+        let click = tap.click
+        let clicking = tap.isMouseDown || mouseUpPending
+        // A title-bar double-click: macOS zoomed (or unzoomed) the window. Make it Panespace's zoom instead.
+        if resized, !w.isFloating, click.count >= 2, !click.dragged, click.seq != zoomedClick,
+           clicking || Date().timeIntervalSince(click.upAt) < 0.6 {
+            return titleBarZoom(id, click: click.seq)
+        }
+        // Only a real drag is the user moving or resizing; a still click that moved the window was the app.
+        if clicking && click.dragged {
             if let live = liveResize, live != id { return }  // our own re-tiling of its neighbours
             if resized, !w.isFloating, let f = frame {
                 liveResize = id
@@ -442,8 +469,22 @@ final class WindowManager {
             reappliedAt[id] = Date()
             lastApplied[id] = nil
             appliedSize[id] = nil
+            unsure.insert(id)
             scheduleApply()
         }
+    }
+
+    /// macOS zoomed the window after a title-bar double-click: toggle Panespace's zoom (fullscreen) instead.
+    /// The layout waits out macOS's own zoom animation so the two don't fight, then glides from where it ended.
+    private func titleBarZoom(_ id: WindowID, click: Int) {
+        zoomedClick = click
+        settling[id] = Date().addingTimeInterval(0.3)
+        holdApplyUntil = Date().addingTimeInterval(0.25)
+        model.run("fullscreen toggle", on: id)
+        unsure.insert(id)
+        lastApplied[id] = nil
+        appliedSize[id] = nil
+        scheduleApply()
     }
 
     /// Reads which window the OS has focused, off the main thread, and follows it.
@@ -494,6 +535,7 @@ final class WindowManager {
                 model.floatingWindowDropped(id, frame: f)
                 continue
             }
+            unsure.insert(id)
             if resized {
                 model.userResized(id, from: seenFrame[id], to: f)
                 seenFrame[id] = f
@@ -523,6 +565,8 @@ final class WindowManager {
         appliedSize.removeAll()
         seenFrame.removeAll()
         hiddenByUs.removeAll()  // re-hide on the new geometry
+        instantNext = true
+        shownOn.removeAll()
         requestSync(.all)
         scheduleApply()
     }
@@ -609,7 +653,7 @@ final class WindowManager {
     private func liveApply() {
         guard !liveApplyBusy else { return liveApplyAgain = true }
         liveApplyBusy = true
-        apply(warp: false, leave: liveResize)
+        apply(warp: false, leave: liveResize, animate: false)
         axQueue.async {
             DispatchQueue.main.async { [self] in
                 liveApplyBusy = false
@@ -691,7 +735,7 @@ final class WindowManager {
     func scheduleApply() {
         guard !applyQueued else { return }
         applyQueued = true
-        DispatchQueue.main.async { [self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0, holdApplyUntil.timeIntervalSinceNow)) { [self] in
             applyQueued = false
             if tap.isMouseDown || modDrag != nil { return }  // never fight a drag; mouse-up applies
             apply()
@@ -842,6 +886,7 @@ final class WindowManager {
             }
             model.addWindow(id, info: info, floating: s.kind == .float, frame: s.frame, useMonitorOfFrame: startup)
             added.append(id)
+            unsure.insert(id)  // it glides in from wherever the app opened it
         }
         if startup, case .all = scope {
             startup = false
@@ -882,6 +927,10 @@ final class WindowManager {
         missing[id] = nil
         dragged[id] = nil
         seenFrame[id] = nil
+        animating.remove(id)
+        settling[id] = nil
+        unsure.remove(id)
+        liveFrames[id] = nil
         if liveResize == id { liveResize = nil }
         if lastFocused == id { lastFocused = nil }
     }
@@ -903,35 +952,81 @@ final class WindowManager {
 
     /// Makes the real windows match the model. Bookkeeping happens here on main; the AX writes and the
     /// focus change are queued in order on `axQueue`, so the main thread never waits for an app.
-    private func apply(warp: Bool = true, leave: WindowID? = nil) {
+    /// Animated layouts glide (`Animator`); `animate: false` (live drags) and display changes jump.
+    private func apply(warp: Bool = true, leave: WindowID? = nil, animate: Bool = true) {
         let placements = model.placements()
         let fallback = model.focusedMonitor.visibleFrame
+        let animated = animate && leave == nil && model.config.animations && model.config.animationDuration > 0
+            && !startup && !instantNext && modDrag == nil && !tap.isMouseDown
+        instantNext = false
+        let slides = workspaceSlides(animated: animated)
+        /// Where a window that stays on screen starts its glide.
+        func origin(_ id: WindowID) -> Start {
+            if animating.contains(id) { return .live(lastApplied[id]) }
+            if let last = lastApplied[id], !unsure.contains(id) { return .at(last) }
+            return .current
+        }
         var show: [pid_t: [Job]] = [:]
         var hide: [pid_t: [Job]] = [:]
+        var moves: [Move] = []
+        // In flight already and still headed the same way: only moved again if this layout restarts the animation.
+        var carried: [Move] = []
         for (id, p) in placements {
             guard let el = elements[id], let pid = pids[id], let w = model.windows[id] else { continue }
             let wasHidden = hiddenByUs.contains(id)
             switch p {
             case .tiled(let r):
-                if id == leave || (lastApplied[id] == r && !wasHidden) { continue }
-                show[pid, default: []].append(Job(id: id, el: el, action: .frame(r, positionOnly: appliedSize[id] == r.size,
-                                                                                  from: wasHidden ? nil : lastApplied[id])))
+                if id == leave { continue }
+                let unchanged = lastApplied[id] == r && !wasHidden
+                if unchanged && !animating.contains(id) { continue }
+                if animated {
+                    var m = Move(id: id, el: el, pid: pid, start: origin(id), to: r)
+                    if wasHidden {  // its workspace just came on screen: slide in, or just appear
+                        let s = slides[w.workspace?.monitorID ?? 0]
+                        m.start = .at(s.map { r.offsetBy(dx: $0.enter.dx, dy: $0.enter.dy) } ?? r)
+                        // Parked at its tile's size: the first frame moves it straight from the corner. Only a
+                        // size change needs putting it at the start first (3 AX calls before anything moves).
+                        m.jump = appliedSize[id] != r.size
+                    }
+                    if unchanged { carried.append(m) } else { moves.append(m) }
+                } else {
+                    show[pid, default: []].append(Job(id: id, el: el, action: .frame(r, positionOnly: appliedSize[id] == r.size,
+                                                                                      from: wasHidden ? nil : lastApplied[id])))
+                }
+                unsure.remove(id)
                 lastApplied[id] = r
                 appliedSize[id] = r.size
                 hiddenByUs.remove(id)
             case .floating(let f, let dirty):
                 if !dirty && !wasHidden { continue }
-                show[pid, default: []].append(Job(id: id, el: el, action: f.map { .frame($0, positionOnly: false, from: nil) } ?? .center(in: fallback)))
+                if animated, wasHidden, let f, let s = slides[w.workspace?.monitorID ?? 0] {
+                    moves.append(Move(id: id, el: el, pid: pid, start: .at(f.offsetBy(dx: s.enter.dx, dy: s.enter.dy)), to: f,
+                                      jump: appliedSize[id] != f.size))
+                } else {
+                    show[pid, default: []].append(Job(id: id, el: el, action: f.map { .frame($0, positionOnly: false, from: nil) } ?? .center(in: fallback)))
+                }
                 hiddenByUs.remove(id)
                 model.clearDirty(id)
             case .hidden(let mid):
                 if wasHidden { continue }
-                hide[pid, default: []].append(Job(id: id, el: el, action: .hide(mid, knownWidth: appliedSize[id]?.width,
-                                                                                 readFrame: w.isFloating)))
+                if animated, let s = slides[mid] {  // its workspace was switched away: slide out, then park
+                    var m = Move(id: id, el: el, pid: pid, start: w.isFloating ? .current : origin(id), by: s.exit)
+                    m.park = mid
+                    m.parkWidth = appliedSize[id]?.width
+                    m.readFrame = w.isFloating
+                    moves.append(m)
+                } else {
+                    hide[pid, default: []].append(Job(id: id, el: el, action: .hide(mid, knownWidth: appliedSize[id]?.width,
+                                                                                     readFrame: w.isFloating)))
+                }
                 hiddenByUs.insert(id)
                 lastApplied[id] = nil
             }
         }
+        // Anything else to write replaces the running animation, so it has to carry that one's windows on;
+        // otherwise the running animation is left to finish delivering them.
+        let restart = !moves.isEmpty || !show.isEmpty || !hide.isEmpty
+        if restart { moves += carried }
 
         var focusJob: (pid: pid_t, id: WindowID, el: AXUIElement, gen: Int)?
         if let f = model.focusedWindow {
@@ -947,7 +1042,7 @@ final class WindowManager {
             NSApp.activate(ignoringOtherApps: true)
         }
 
-        if !show.isEmpty || !hide.isEmpty || focusJob != nil {
+        if restart || focusJob != nil {
             let monitors = model.monitors
             let generation = focusGeneration
             let queue = axQueue
@@ -958,21 +1053,41 @@ final class WindowManager {
                     if case .frame(let r, _, _) = job.action { arriving[job.id] = r.origin }
                 }
             }
+            let gen = restart ? animGeneration.increment() : animGeneration.value
+            if restart { animating = Set(moves.map(\.id)) }
+            let (duration, anims, store) = (model.config.animationDuration, animGeneration, liveFrames)
+            let moving = moves.map(\.id)
+            let debug = self.debug
+            let queued = CACurrentMediaTime()
             axQueue.async { [weak self] in
-                var written = WindowManager.write(show, monitors: monitors)
-                // Park the old workspace only once the new one is really on screen; otherwise apps that are slow
-                // to move (tens of ms) leave a frame of bare desktop in between: the "flicker".
-                WindowManager.waitUntilShown(arriving, timeout: 0.08)
-                written.floating += WindowManager.write(hide, monitors: monitors).floating
-                if let fj = focusJob {
+                let waited = CACurrentMediaTime() - queued
+                func focus() {
+                    guard let fj = focusJob else { return }
                     Focus.focus(pid: fj.pid, windowID: fj.id, element: fj.el)
                     // Tahoe sometimes leaves another app's window on top; raise once more unless focus moved on.
                     queue.asyncAfter(deadline: .now() + 0.12) {
                         if generation.value == fj.gen { fj.el.perform(kAXRaiseAction) }
                     }
                 }
-                if !written.floating.isEmpty || !written.oversized.isEmpty {
-                    DispatchQueue.main.async { self?.afterWrite(written) }
+                // While gliding, focus alongside the first frames: keys go to the new window now, and the
+                // animation doesn't wait for the focus change to start.
+                if !moves.isEmpty { DispatchQueue.global(qos: .userInteractive).async(execute: focus) }
+                var written = WindowManager.write(show, monitors: monitors)
+                // Park the old workspace only once the new one is really on screen; otherwise apps that are slow
+                // to move (tens of ms) leave a frame of bare desktop in between: the "flicker".
+                WindowManager.waitUntilShown(arriving, timeout: 0.08)
+                written.floating += WindowManager.write(hide, monitors: monitors).floating
+                if moves.isEmpty { focus() }
+                let glide = Animator.run(moves, duration: duration, gen: gen, generation: anims, store: store, monitors: monitors)
+                written.floating += glide.floating
+                written.oversized += glide.oversized
+                if debug, !moves.isEmpty {
+                    log(String(format: "animated %d windows: queue %.1f ms, setup %.1f ms, %d frames, slowest %.1f ms",
+                               moves.count, waited * 1000, glide.setup * 1000, glide.frames, glide.slowest * 1000))
+                }
+                DispatchQueue.main.async {
+                    self?.afterWrite(written)
+                    if !moving.isEmpty { self?.animationEnded(gen, moving) }
                 }
             }
         }
@@ -987,6 +1102,30 @@ final class WindowManager {
         lastFocusedMonitor = m.id
         updateBorder()
         updateStatus()
+    }
+
+    /// The monitors whose workspace just changed, and which way their windows slide. Always records what
+    /// each monitor shows, so the next switch knows where it came from.
+    private func workspaceSlides(animated: Bool) -> [MonitorID: Motion.Slide] {
+        var out: [MonitorID: Motion.Slide] = [:]
+        let order = model.sortedWorkspaces.map(\.name)
+        for ws in model.sortedWorkspaces where model.isVisible(ws) {
+            let mid = ws.monitorID
+            defer { shownOn[mid] = ws.name }
+            guard animated, let before = shownOn[mid], before != ws.name, let mon = model.monitor(mid),
+                  let slide = Motion.slide(on: mon, among: model.monitors,
+                                           forward: Motion.isForward(from: before, to: ws.name, order: order)) else { continue }
+            out[mid] = slide
+        }
+        return out
+    }
+
+    /// The animation landed. Its windows' late move notifications are still ours for a moment.
+    private func animationEnded(_ gen: Int, _ ids: [WindowID]) {
+        guard gen == animGeneration.value else { return }  // a newer layout took these windows over
+        animating.removeAll()
+        let until = Date().addingTimeInterval(0.3)
+        for id in ids { settling[id] = until }
     }
 
     private struct Written {
@@ -1244,8 +1383,3 @@ final class AlertPanel: NSObject {
     }
 }
 
-/// Both frames' centers are on the same monitor.
-private func sameMonitor(_ a: CGRect, _ b: CGRect, _ monitors: [Monitor]) -> Bool {
-    let m = { (r: CGRect) in monitors.first { $0.frame.contains(CGPoint(x: r.midX, y: r.midY)) }?.id }
-    return m(a) != nil && m(a) == m(b)
-}

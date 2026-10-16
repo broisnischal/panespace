@@ -149,6 +149,9 @@ final class StatusBar: NSObject, NSMenuDelegate {
         let ffm = menuItem("Focus Follows Mouse", #selector(toggleFocusFollowsMouse))
         ffm.state = model.config.focusFollowsMouse ? .on : .off
         sub.addItem(ffm)
+        let anim = menuItem("Animations", #selector(toggleAnimations))
+        anim.state = model.config.animations ? .on : .off
+        sub.addItem(anim)
         let login = menuItem("Open at Login", #selector(toggleLogin))
         login.state = LoginItem.isEnabled ? .on : .off
         sub.addItem(login)
@@ -284,6 +287,10 @@ final class StatusBar: NSObject, NSMenuDelegate {
 
     @objc private func toggleFocusFollowsMouse() {
         writeSetting("focus_follows_mouse", manager?.model.config.focusFollowsMouse == true ? "no" : "yes")
+    }
+
+    @objc private func toggleAnimations() {
+        writeSetting("animations", manager?.model.config.animations == true ? "no" : "yes")
     }
 
     @objc private func toggleLogin() {

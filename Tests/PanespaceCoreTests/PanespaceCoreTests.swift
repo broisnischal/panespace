@@ -591,3 +591,30 @@ final class ParserTests: XCTestCase {
         XCTAssertNil(KeyCombo.parse("alt+nope"))
     }
 }
+
+final class MotionTests: XCTestCase {
+    func testEaseAndLerp() {
+        XCTAssertEqual(Motion.ease(0), 0)
+        XCTAssertEqual(Motion.ease(1), 1)
+        XCTAssertGreaterThan(Motion.ease(0.5), 0.9)  // ease-out: most of the way by halfway
+        XCTAssertEqual(Motion.lerp(CGRect(x: 0, y: 0, width: 100, height: 100), CGRect(x: 100, y: 50, width: 200, height: 100), 0.5),
+                       CGRect(x: 50, y: 25, width: 150, height: 100))
+    }
+
+    func testSlideDirection() {
+        let solo = mon1
+        XCTAssertEqual(Motion.slide(on: solo, among: [solo], forward: true),
+                       Motion.Slide(enter: CGVector(dx: 1000, dy: 0), exit: CGVector(dx: -1000, dy: 0)))
+        // A display to the right: sliding sideways would cross it, so windows rise from below instead.
+        XCTAssertEqual(Motion.slide(on: mon1, among: [mon1, mon2], forward: false),
+                       Motion.Slide(enter: CGVector(dx: 0, dy: 500), exit: CGVector(dx: 0, dy: 500)))
+        XCTAssertTrue(Motion.isForward(from: "2", to: "10", order: []))
+        XCTAssertFalse(Motion.isForward(from: "web", to: "chat", order: ["chat", "web"]))
+    }
+
+    func testAnimationConfig() {
+        let c = Config.parse("animations no\nanimation_duration 250")
+        XCTAssertFalse(c.animations)
+        XCTAssertEqual(c.animationDuration, 0.25, accuracy: 1e-9)
+    }
+}

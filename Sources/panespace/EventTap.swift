@@ -27,6 +27,17 @@ final class EventTap {
 
     var isMouseDown: Bool { lock.withLock { _mouseDown } }
 
+    /// The latest left click: how many in a row, and whether the mouse really moved while it was down.
+    struct Click {
+        var seq = 0
+        var count = 0
+        var dragged = false
+        var down = CGPoint.zero
+        var upAt = Date.distantPast
+    }
+    private var _click = Click()
+    var click: Click { lock.withLock { _click } }
+
     func setBindings(_ b: [KeyCombo: String], trackMouseMoves: Bool, floatingModifier: Modifiers?, capsLock: Bool,
                      interceptFullscreen: Bool) {
         lock.withLock {
@@ -118,8 +129,13 @@ final class EventTap {
         case .leftMouseDown, .rightMouseDown:
             let button: CGMouseButton = type == .rightMouseDown ? .right : .left
             let (mods, _) = modifiers(event)
+            let count = Int(event.getIntegerValueField(.mouseEventClickState))
+            let p0 = event.location
             let startDrag = lock.withLock { () -> Bool in
-                if button == .left { _mouseDown = true }
+                if button == .left {
+                    _mouseDown = true
+                    _click = Click(seq: _click.seq + 1, count: count, dragged: false, down: p0)
+                }
                 guard dragButton == nil, let fm = floatingModifier, mods.isSuperset(of: fm) else { return false }
                 dragButton = button
                 return true
@@ -131,7 +147,10 @@ final class EventTap {
             }
         case .leftMouseDragged, .rightMouseDragged:
             // Coalesce: at most one move in flight on the main thread, always with the latest point.
+            let p1 = event.location
             let (active, dispatch) = lock.withLock { () -> (Bool, Bool) in
+                // A few points of jitter in a double-click isn't a drag.
+                if !_click.dragged, hypot(p1.x - _click.down.x, p1.y - _click.down.y) > 4 { _click.dragged = true }
                 guard dragButton != nil else { return (false, false) }
                 dragPoint = event.location
                 defer { dragDispatchPending = true }
@@ -150,7 +169,7 @@ final class EventTap {
         case .leftMouseUp, .rightMouseUp:
             let button: CGMouseButton = type == .rightMouseUp ? .right : .left
             let endDrag = lock.withLock { () -> Bool in
-                if button == .left { _mouseDown = false }
+                if button == .left { _mouseDown = false; _click.upAt = Date() }
                 guard dragButton == button else { return false }
                 dragButton = nil
                 return true

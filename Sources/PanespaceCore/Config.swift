@@ -32,6 +32,10 @@ public struct Config {
     public var interceptNativeFullscreen = true
     /// Switching workspaces shows the new windows before parking the old ones, so the bare desktop never flashes.
     public var smoothLayout = true
+    /// Layout changes glide instead of jumping (`animations no` turns it off).
+    public var animations = true
+    /// Seconds a layout animation takes (`animation_duration <ms>`).
+    public var animationDuration = 0.18
     /// Menu bar indicator look: segmented | dots | tiles.
     public var workspaceIndicator = "number"
     /// nil = leave the macOS menu bar/Dock alone; true/false = set immersive mode at startup.
@@ -231,6 +235,9 @@ public struct Config {
             case "immersive": c.immersive = bool(a.first)
             case "native_fullscreen": c.interceptNativeFullscreen = a.first != "macos"
             case "smooth_layout": c.smoothLayout = bool(a.first)
+            case "animations": c.animations = bool(a.first)
+            case "animation_duration":
+                if let v = a.first.flatMap(Double.init), v >= 0 { c.animationDuration = min(v, 1000) / 1000 } else { warn("bad animation_duration") }
             case "workspace_indicator":
                 if let v = a.first, ["number", "segmented", "dots", "tiles"].contains(v) { c.workspaceIndicator = v } else {
                     warn("expected: workspace_indicator number|segmented|dots|tiles")
