@@ -20,12 +20,17 @@ test:
 icon:
 	rm -rf .build/AppIcon.iconset && mkdir -p .build/AppIcon.iconset
 	swift scripts/make-icon.swift .build/AppIcon.png
+	swift scripts/make-icon.swift .build/AppIcon-small.png small
 	for s in 16 32 128 256 512; do \
 	  sips -z $$s $$s .build/AppIcon.png --out .build/AppIcon.iconset/icon_$${s}x$${s}.png >/dev/null; \
 	  sips -z $$((s*2)) $$((s*2)) .build/AppIcon.png --out .build/AppIcon.iconset/icon_$${s}x$${s}@2x.png >/dev/null; \
 	done
+	# 16 and 32 px come from the bold variant (64 px and up keep the fine one).
+	for f in 16x16:16 16x16@2x:32 32x32:32; do \
+	  sips -z $${f#*:} $${f#*:} .build/AppIcon-small.png --out .build/AppIcon.iconset/icon_$${f%:*}.png >/dev/null; \
+	done
 	iconutil -c icns .build/AppIcon.iconset -o Resources/AppIcon.icns
-	sips -z 256 256 .build/AppIcon.png --out Resources/AppIcon.png >/dev/null
+	sips -z 512 512 .build/AppIcon.png --out Resources/AppIcon.png >/dev/null
 
 # $(call bundle,Name,executable,plist[,icon]): build Name.app around .build/release/executable and sign it.
 define bundle
