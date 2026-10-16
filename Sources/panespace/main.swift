@@ -14,6 +14,7 @@ USAGE
   panespace msg -t <type>        query: get_tree, get_workspaces, get_bindings, get_binding_modes, get_config, get_version
   panespace <command>            shorthand for `panespace msg <command>`
   panespace list-windows         show every window and how panespace classifies it (for writing rules)
+  panespace preview-indicator <png>  render every menu bar indicator look to an image
   panespace check-config [path]  parse a config and print warnings
   panespace init-config          write the default config if none exists, print its path
 
@@ -40,7 +41,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var wm: WindowManager?
     private var waitItem: NSStatusItem?
     private var waitTimer: Timer?
-
     /// Held for the app's lifetime: App Nap would coalesce our timers and stretch animations and key handling.
     /// Idle system sleep stays allowed.
     private var activity: NSObjectProtocol?
@@ -144,6 +144,8 @@ case "msg":
     }
     send(type, a.joined(separator: " "))
 case "list-windows": listWindows()
+case "preview-indicator":
+    WorkspaceIcon.writePreview(to: URL(fileURLWithPath: args.count > 1 ? args[1] : "indicator-preview.png"))
 case "check-config":
     let url = args.count > 1 ? URL(fileURLWithPath: args[1]) : configURL()
     guard let text = try? String(contentsOf: url, encoding: .utf8) else {

@@ -36,7 +36,7 @@ public struct Config {
     public var animations = true
     /// Seconds a layout animation takes (`animation_duration <ms>`).
     public var animationDuration = 0.18
-    /// Menu bar indicator look: segmented | dots | tiles.
+    /// Menu bar indicator look: number | pill | panes | circle | minimal (current workspace) or segmented | dots | tiles.
     public var workspaceIndicator = "number"
     /// nil = leave the macOS menu bar/Dock alone; true/false = set immersive mode at startup.
     public var immersive: Bool?
@@ -239,8 +239,8 @@ public struct Config {
             case "animation_duration":
                 if let v = a.first.flatMap(Double.init), v >= 0 { c.animationDuration = min(v, 1000) / 1000 } else { warn("bad animation_duration") }
             case "workspace_indicator":
-                if let v = a.first, ["number", "segmented", "dots", "tiles"].contains(v) { c.workspaceIndicator = v } else {
-                    warn("expected: workspace_indicator number|segmented|dots|tiles")
+                if let v = a.first, ["number", "pill", "panes", "circle", "minimal", "segmented", "dots", "tiles"].contains(v) { c.workspaceIndicator = v } else {
+                    warn("expected: workspace_indicator number|pill|panes|circle|minimal|segmented|dots|tiles")
                 }
             case "smart_gaps": c.smartGaps = bool(a.first)
             case "workspace_auto_back_and_forth": c.autoBackAndForth = bool(a.first)

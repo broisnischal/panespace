@@ -618,3 +618,16 @@ final class MotionTests: XCTestCase {
         XCTAssertEqual(c.animationDuration, 0.25, accuracy: 1e-9)
     }
 }
+
+final class IndicatorConfigTests: XCTestCase {
+    func testIndicatorLooks() {
+        for look in ["number", "pill", "panes", "circle", "minimal", "segmented", "dots", "tiles"] {
+            let c = Config.parse("workspace_indicator \(look)")
+            XCTAssertEqual(c.workspaceIndicator, look)
+            XCTAssertTrue(c.warnings.isEmpty, look)
+        }
+        let bad = Config.parse("workspace_indicator ring")
+        XCTAssertEqual(bad.workspaceIndicator, "number")
+        XCTAssertEqual(bad.warnings.count, 1)
+    }
+}

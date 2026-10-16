@@ -76,7 +76,7 @@ gaps inner 8
 smart_gaps on
 focus_follows_mouse no
 animations yes                     # animation_duration 180 (ms)
-workspace_indicator number         # menu bar: number | segmented | dots | tiles
+workspace_indicator number         # menu bar: number | pill | panes | circle | minimal | segmented | dots | tiles
 floating_modifier $mod             # $mod+drag moves, $mod+right-drag resizes
 
 workspace 9 output secondary

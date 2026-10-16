@@ -19,7 +19,7 @@ gaps outer 8
 smart_gaps off
 accordion_padding 30          # how much of neighbouring windows peeks out in tabbed/stacking
 default_orientation auto      # horizontal on landscape monitors, vertical on portrait
-workspace_indicator number    # menu bar: number (current workspace only) | segmented | dots | tiles
+workspace_indicator number    # menu bar, current workspace: number | pill | panes | circle | minimal; all: segmented | dots | tiles
 default_border none           # "default_border pixel 2" draws an i3-style outline around the focused window
 border_radius 12
 #                 border  bg      text    indicator child_border

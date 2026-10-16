@@ -101,7 +101,7 @@ final class StatusBar: NSObject, NSMenuDelegate {
                             shortcut: ["workspace number \(ws.name)", "workspace \(ws.name)", "workspace \"\(ws.name)\""])
         item.representedObject = ws.name
         item.state = focused ? .on : .off
-        item.image = WorkspaceIcon.menuBadge(ws.name, filled: focused)
+        item.image = WorkspaceIcon.menuBadge(ws.name, filled: focused, look: WorkspaceIcon.Look(rawValue: model.config.workspaceIndicator) ?? .number)
 
         let font = NSFont.menuFont(ofSize: 0)
         let primary: [NSAttributedString.Key: Any] = [.font: font]
@@ -173,7 +173,8 @@ final class StatusBar: NSObject, NSMenuDelegate {
         ("caps", "Caps Lock ⇪"), ("hyper", "Hyper ⌃⌥⇧⌘"),
     ]
     private static let indicators: [(value: String, label: String)] = [
-        ("number", "Current Number"), ("segmented", "Segmented"), ("dots", "Dots"), ("tiles", "Tiles"),
+        ("number", "Number"), ("pill", "Pill"), ("panes", "Panes + Number"), ("circle", "Circle"), ("minimal", "Minimal"),
+        ("segmented", "All Workspaces: Segmented"), ("dots", "All Workspaces: Dots"), ("tiles", "All Workspaces: Tiles"),
     ]
 
     /// A submenu of values for one config setting; picking one writes it to the config and reloads.
@@ -335,13 +336,22 @@ final class StatusBar: NSObject, NSMenuDelegate {
 }
 
 /// Renders the workspace indicator as a template image (macOS tints it like its own icons).
-///   segmented (default)  one capsule control; the focused workspace is a solid pill, number cut out
-///   dots                 focused workspace as a numbered pill, the others as small dots (Omarchy-like)
-///   tiles                focused workspace as a solid tile, others as plain numbers
+/// Current workspace only:
+///   number (default)  a solid rounded square, the number cut out
+///   pill              a solid capsule, the number cut out
+///   panes             Panespace's three-pane mark, then the number
+///   circle            a solid circle, the number cut out
+///   minimal           just the number, underlined
+/// Every workspace:
+///   segmented         one capsule control; the focused workspace is a solid pill, number cut out
+///   dots              focused workspace as a numbered pill, the others as small dots (Omarchy-like)
+///   tiles             focused workspace as a solid tile, others as plain numbers
 /// A workspace shown on another display gets an outline instead of a fill.
 enum WorkspaceIcon {
     enum Style { case focused, visible, occupied }
-    enum Look: String { case number, segmented, dots, tiles }
+    enum Look: String, CaseIterable { case number, pill, panes, circle, minimal, segmented, dots, tiles }
+    /// Looks that show only the current workspace.
+    static let single: Set<Look> = [.number, .pill, .panes, .circle, .minimal]
 
     struct Slot: CustomStringConvertible {
         let label: String
@@ -365,38 +375,90 @@ enum WorkspaceIcon {
         return NSFont(descriptor: desc, size: size) ?? base
     }
 
-    /// The workspace's badge in the menu: Apple's "3.square(.fill)", or the first letter of a named workspace.
-    static func menuBadge(_ name: String, filled: Bool) -> NSImage? {
-        var glyph = ""
-        if let n = Int(name) {
-            if (0...50).contains(n) { glyph = "\(n)." }
-        } else if let c = name.first, c.isASCII, c.isLetter || c.isNumber {
-            glyph = c.lowercased() + "."
+    /// The workspace's badge in the menu, drawn like the menu bar indicator: solid for the current one,
+    /// outlined for the rest. Named workspaces show their first letter.
+    static func menuBadge(_ name: String, filled: Bool, look: Look) -> NSImage {
+        let label = Int(name) != nil ? name : String(name.prefix(1)).uppercased()
+        let shape: Look = look == .pill || look == .circle ? look : .number
+        let image = NSImage(size: badgeSize(label, shape, height: 15), flipped: false) { r in
+            guard let cg = NSGraphicsContext.current?.cgContext else { return false }
+            drawBadge(label, shape, filled: filled, in: r, cg)
+            return true
         }
-        let image = NSImage(systemSymbolName: "\(glyph)square\(filled ? ".fill" : "")", accessibilityDescription: "Workspace \(name)")
-        return image?.withSymbolConfiguration(.init(pointSize: 14, weight: .regular))
+        image.isTemplate = true
+        image.accessibilityDescription = "Workspace \(name)"
+        return image
+    }
+
+    private static func badgeFont(_ look: Look, _ h: CGFloat) -> NSFont {
+        switch look {
+        case .minimal: return font(h * 0.94, .heavy)
+        case .panes: return font(h * 0.84, .semibold)
+        case .circle: return font(h * 0.64, .bold)
+        default: return font(h * 0.72, .bold)
+        }
+    }
+
+    private static func badgeSize(_ label: String, _ look: Look, height h: CGFloat) -> NSSize {
+        let w = textWidth(label, badgeFont(look, h))
+        switch look {
+        case .pill: return NSSize(width: max(h * 1.6, w + h * 0.95), height: h)
+        case .panes: return NSSize(width: h * 0.95 + 4 + w, height: h)
+        case .minimal: return NSSize(width: w + 3, height: h)
+        default: return NSSize(width: max(h, w + h * 0.55), height: h)
+        }
+    }
+
+    /// One badge. `filled`: a solid shape with the number cut out; otherwise an outline around the number.
+    private static func drawBadge(_ label: String, _ look: Look, filled: Bool, in r: NSRect, _ cg: CGContext) {
+        let f = badgeFont(look, r.height)
+        NSColor.black.set()
+        switch look {
+        case .circle:
+            let d = r.height
+            let bounds = NSRect(x: r.midX - max(d, r.width) / 2, y: r.minY, width: max(d, r.width), height: d)
+            let disc = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.8, dy: 0.8), xRadius: d / 2 - 0.8, yRadius: d / 2 - 0.8)
+            if filled { disc.fill(); knockOut(label, f, in: r, cg) } else { disc.lineWidth = 1.6; disc.stroke(); draw(label, f, in: r, alpha: 1) }
+        case .panes:
+            // The app icon's layout: a main pane beside a stack of two, the main one lit.
+            let g = NSRect(x: r.minX, y: r.minY + r.height * 0.06, width: r.height * 0.95, height: r.height * 0.88)
+            let gap = max(1.3, g.width * 0.11), radius = g.height * 0.17
+            let main = NSRect(x: g.minX, y: g.minY, width: (g.width - gap) * 0.54, height: g.height)
+            let rx = main.maxX + gap, half = (g.height - gap) / 2
+            NSBezierPath(roundedRect: main, xRadius: radius, yRadius: radius).fill()
+            NSColor.black.withAlphaComponent(0.42).setFill()
+            for y in [g.minY, g.minY + half + gap] {
+                NSBezierPath(roundedRect: NSRect(x: rx, y: y, width: g.maxX - rx, height: half), xRadius: radius, yRadius: radius).fill()
+            }
+            draw(label, f, in: NSRect(x: g.maxX + 4, y: r.minY, width: r.maxX - g.maxX - 4, height: r.height), alpha: 1)
+        case .minimal:
+            let bar = max(2, r.height * 0.13)
+            draw(label, f, in: NSRect(x: r.minX, y: r.minY + bar + 1, width: r.width, height: r.height - bar - 1), alpha: 1)
+            NSBezierPath(roundedRect: NSRect(x: r.minX + 1, y: r.minY, width: r.width - 2, height: bar), xRadius: bar / 2, yRadius: bar / 2).fill()
+        default:  // number, pill
+            let radius = look == .pill ? r.height / 2 : r.height * 0.3
+            if filled {
+                NSBezierPath(roundedRect: r, xRadius: radius, yRadius: radius).fill()
+                knockOut(label, f, in: r, cg)
+            } else {
+                let outline = NSBezierPath(roundedRect: r.insetBy(dx: 0.65, dy: 0.65), xRadius: radius - 0.65, yRadius: radius - 0.65)
+                outline.lineWidth = 1.3
+                outline.stroke()
+                draw(label, f, in: r, alpha: 1)
+            }
+        }
     }
 
     private static func textWidth(_ s: String, _ f: NSFont) -> CGFloat {
         ceil((s as NSString).size(withAttributes: [.font: f]).width)
     }
 
-    /// The current workspace only, as Apple's own "3.square.fill" symbol so it matches the system icons.
-    /// Names and numbers past 50 get the same rounded square, drawn.
-    private static func renderNumber(_ label: String, mode: String?, secureInput: Bool, warning: Bool) -> NSImage {
-        let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .medium)
-        let symbol = Int(label).flatMap { (0...50).contains($0) ? $0 : nil }.flatMap {
-            NSImage(systemSymbolName: "\($0).square.fill", accessibilityDescription: "Workspace \($0)")?
-                .withSymbolConfiguration(config)
-        }
-        if let symbol, mode == nil, !secureInput, !warning {
-            symbol.isTemplate = true
-            return symbol
-        }
-        let labelFont = font(11.5, .bold)
+    /// The current workspace only, in one of the single looks, after any Secure Input / warning badge and
+    /// binding-mode pill.
+    private static func renderCurrent(_ label: String, _ look: Look, mode: String?, secureInput: Bool, warning: Bool) -> NSImage {
+        let h = height
         let modeFont = font(9.5, .bold)
-        let squareSize = symbol?.size ?? NSSize(width: max(17, textWidth(label, labelFont) + 10), height: 17)
-        let h = max(height, squareSize.height)
+        let size = badgeSize(label, look, height: 16)
         var x: CGFloat = 0
         var lockRect: NSRect?
         if secureInput || warning {
@@ -410,12 +472,12 @@ enum WorkspaceIcon {
             modeRect = NSRect(x: x, y: (h - 16) / 2, width: w, height: 16)
             x += w + 5
         }
-        let badge = warning ? "exclamationmark.triangle.fill" : "lock.fill"
-        let square = NSRect(x: x, y: (h - squareSize.height) / 2, width: squareSize.width, height: squareSize.height)
-        let image = NSImage(size: NSSize(width: square.maxX, height: h), flipped: false) { _ in
+        let symbol = warning ? "exclamationmark.triangle.fill" : "lock.fill"
+        let badge = NSRect(x: x, y: (h - size.height) / 2, width: size.width, height: size.height)
+        let image = NSImage(size: NSSize(width: badge.maxX, height: h), flipped: false) { _ in
             guard let cg = NSGraphicsContext.current?.cgContext else { return false }
             NSColor.black.set()
-            if let r = lockRect, let lock = NSImage(systemSymbolName: badge, accessibilityDescription: nil)?
+            if let r = lockRect, let lock = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
                 .withSymbolConfiguration(.init(pointSize: 10.5, weight: .semibold)) {
                 let s = lock.size
                 lock.draw(in: NSRect(x: r.midX - s.width / 2, y: r.midY - s.height / 2, width: s.width, height: s.height))
@@ -424,12 +486,7 @@ enum WorkspaceIcon {
                 NSBezierPath(roundedRect: r, xRadius: r.height / 2, yRadius: r.height / 2).fill()
                 knockOut(modeText, modeFont, in: r, cg)
             }
-            if let symbol {
-                symbol.draw(in: square)
-            } else {
-                NSBezierPath(roundedRect: square, xRadius: 4.5, yRadius: 4.5).fill()
-                knockOut(label, labelFont, in: square, cg)
-            }
+            drawBadge(label, look, filled: true, in: badge, cg)
             return true
         }
         image.isTemplate = true
@@ -437,9 +494,9 @@ enum WorkspaceIcon {
     }
 
     static func render(slots: [Slot], mode: String?, secureInput: Bool, warning: Bool = false, look: Look = .number) -> NSImage {
-        if look == .number {
-            return renderNumber(slots.first { $0.style == .focused }?.label ?? "", mode: mode, secureInput: secureInput,
-                                warning: warning)
+        if single.contains(look) {
+            return renderCurrent(slots.first { $0.style == .focused }?.label ?? "", look, mode: mode, secureInput: secureInput,
+                                 warning: warning)
         }
         let h = height
         let numberFont = font(12, .semibold)
@@ -463,7 +520,7 @@ enum WorkspaceIcon {
         // Workspace segments.
         var rects: [NSRect] = []
         switch look {
-        case .number: break  // handled by renderNumber
+        case .number, .pill, .panes, .circle, .minimal: break  // single looks: renderCurrent
         case .segmented:
             for s in slots {
                 let w = max(22, textWidth(s.label, numberFont) + 14)
@@ -506,7 +563,7 @@ enum WorkspaceIcon {
             }
 
             switch look {
-            case .number: break
+            case .number, .pill, .panes, .circle, .minimal: break
             case .segmented:
                 if let first = rects.first, let last = rects.last {
                     fill(capsule(NSRect(x: first.minX, y: 0, width: last.maxX - first.minX, height: h)), 0.13)
@@ -582,5 +639,48 @@ enum WorkspaceIcon {
         cg.setBlendMode(.destinationOut)
         (s as NSString).draw(at: origin(s, f, in: r), withAttributes: [.font: f, .foregroundColor: NSColor.black])
         cg.restoreGState()
+    }
+}
+
+extension WorkspaceIcon {
+    /// `panespace preview-indicator`: every look on a dark and a light menu bar at 4×, with a two-digit
+    /// workspace and a binding mode, plus the menu badges. For judging looks without a screenshot.
+    static func writePreview(to url: URL) {
+        let scale: CGFloat = 4, labelW: CGFloat = 230, panelW: CGFloat = 860, rowH = height * scale + 36
+        let slots = [Slot(label: "1", style: .focused), Slot(label: "2", style: .occupied), Slot(label: "4", style: .occupied)]
+        let looks = Look.allCases
+        let size = NSSize(width: labelW + 2 * panelW, height: rowH * CGFloat(looks.count + 1))
+        let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width), pixelsHigh: Int(size.height), bitsPerSample: 8,
+                                   samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        let dark = NSColor(white: 0.13, alpha: 1), light = NSColor(white: 0.92, alpha: 1)
+        dark.setFill(); NSRect(x: labelW, y: 0, width: panelW, height: size.height).fill()
+        light.setFill(); NSRect(x: labelW + panelW, y: 0, width: panelW, height: size.height).fill()
+        NSColor(white: 0.2, alpha: 1).setFill(); NSRect(x: 0, y: 0, width: labelW, height: size.height).fill()
+        func tinted(_ img: NSImage, _ c: NSColor) -> NSImage {
+            NSImage(size: img.size, flipped: false) { r in img.draw(in: r); c.set(); r.fill(using: .sourceAtop); return true }
+        }
+        func strip(_ images: [NSImage], y: CGFloat) {
+            for (panel, ink) in [(labelW, NSColor.white), (labelW + panelW, NSColor.black)] {
+                var x = panel + 30
+                for img in images {
+                    let s = NSSize(width: img.size.width * scale, height: img.size.height * scale)
+                    tinted(img, ink).draw(in: NSRect(x: x, y: y + (rowH - s.height) / 2, width: s.width, height: s.height))
+                    x += s.width + 70
+                }
+            }
+        }
+        let attrs: [NSAttributedString.Key: Any] = [.foregroundColor: NSColor.white, .font: NSFont.monospacedSystemFont(ofSize: 22, weight: .medium)]
+        for (i, look) in looks.enumerated() {
+            let y = size.height - rowH * CGFloat(i + 1)
+            (look.rawValue as NSString).draw(at: NSPoint(x: 20, y: y + rowH / 2 - 14), withAttributes: attrs)
+            strip([render(slots: slots, mode: nil, secureInput: false, look: look),
+                   render(slots: [Slot(label: "12", style: .focused)], mode: nil, secureInput: false, look: look),
+                   render(slots: slots, mode: "resize", secureInput: false, look: look)], y: y)
+        }
+        ("menu" as NSString).draw(at: NSPoint(x: 20, y: rowH / 2 - 14), withAttributes: attrs)
+        strip([Look.number, .pill, .circle].flatMap { l in [menuBadge("1", filled: true, look: l), menuBadge("2", filled: false, look: l)] }, y: 0)
+        NSGraphicsContext.current = nil
+        try? rep.representation(using: .png, properties: [:])?.write(to: url)
     }
 }
